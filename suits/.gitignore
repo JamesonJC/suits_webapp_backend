@@ -1,0 +1,61 @@
+# ------------------------
+# Python / Django
+# ------------------------
+*.pyc
+*.pyo
+__pycache__/
+*.pyd
+*.pdb
+*.egg
+*.egg-info/
+dist/
+build/
+*.log
+
+# Django stuff:
+*.sqlite3
+db.sqlite3
+media/
+staticfiles/
+static/
+
+# Environment variables
+.env
+.env.*
+
+# ------------------------
+# Virtual environment
+# ------------------------
+venv/
+ENV/
+env/
+.venv/
+
+# ------------------------
+# Docker
+# ------------------------
+docker-compose.override.yml
+docker-compose.override.yaml
+*.pid
+*.sock
+*.log
+*.tmp
+docker/*.log
+docker/*.pid
+
+# ------------------------
+# IDEs / Editors
+# ------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-workspace
+*.sublime-project
+
+# ------------------------
+# Fly.io / deployment
+# ------------------------
+.fly/
+.fly.toml
+*.deploy
