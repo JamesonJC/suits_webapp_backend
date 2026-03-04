@@ -3,15 +3,23 @@ from django.db import models
 # Create your models here.
 from django.db import models
 from apps.core.models import BaseModel
+from apps.tenants.models import Tenant
+
 
 class LawFirm(BaseModel):
+    tenant = models.OneToOneField(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="law_firm"
+    )
+
     name = models.CharField(max_length=255)
     code = models.CharField(max_length=50, unique=True)
     address = models.TextField(null=True, blank=True)
     active = models.BooleanField(default=True)
 
     def __str__(self):
-        return self.name
+        return f"{self.name} ({self.code})"
 
 class Attorney(BaseModel):
     user = models.OneToOneField(
@@ -45,14 +53,23 @@ class Case(BaseModel):
     client = models.ForeignKey(
         Client, on_delete=models.CASCADE, related_name="cases"
     )
-    case_number = models.CharField(max_length=100, unique=True)
+
+    case_number = models.CharField(max_length=100)
     title = models.CharField(max_length=255)
-    status = models.CharField(max_length=50, default="OPEN")  # OPEN, CLOSED, PENDING
+
+    status = models.CharField(max_length=50, default="OPEN")
+
     start_date = models.DateField(auto_now_add=True)
     end_date = models.DateField(null=True, blank=True)
+
     workflow_template = models.ForeignKey(
-        "workflows.WorkflowTemplate", on_delete=models.SET_NULL, null=True
+        "workflows.WorkflowTemplate",
+        on_delete=models.SET_NULL,
+        null=True
     )
+
+    class Meta:
+        unique_together = ("law_firm", "case_number")
 
     def __str__(self):
         return f"{self.case_number} - {self.title}"

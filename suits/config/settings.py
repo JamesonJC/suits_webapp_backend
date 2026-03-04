@@ -47,12 +47,13 @@ INSTALLED_APPS = [
     # Local apps
     'apps.core',
     'apps.tenants',
+    'apps.lawfirms',
     'apps.users',
     'apps.rbac',
-    'apps.workflows',
     'apps.forms_engine',
     'apps.jobs',
     'apps.api',
+    'apps.workflows',
     'apps.audit',
 ]
 
@@ -62,11 +63,14 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
-    "django.contrib.messages.middleware.MessageMiddleware",
-    "django.middleware.clickjacking.XFrameOptionsMiddleware",
 
     "corsheaders.middleware.CorsMiddleware",
+    #order Tenant AFTER auth
     "apps.tenants.middleware.TenantMiddleware",
+
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    
 ]
 
 REST_FRAMEWORK = {
