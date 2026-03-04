@@ -4,7 +4,8 @@ from django.db import models
 from django.db import models
 from apps.core.models import BaseModel
 from apps.tenants.models import Tenant
-
+from apps.tenants.context import get_current_tenant
+from django.core.exceptions import ValidationError
 
 class LawFirm(BaseModel):
     tenant = models.OneToOneField(
@@ -65,20 +66,43 @@ class Case(BaseModel):
     workflow_template = models.ForeignKey(
         "workflows.WorkflowTemplate",
         on_delete=models.SET_NULL,
-        null=True
+        null=True,
+        blank=True
     )
 
     class Meta:
         unique_together = ("law_firm", "case_number")
 
+    def clean(self):
+        """
+        Ensure workflow_template belongs to same tenant as law_firm.
+        """
+        if self.workflow_template:
+            if self.workflow_template.tenant != self.law_firm.tenant:
+                raise ValidationError(
+                    "WorkflowTemplate must belong to the same tenant as the LawFirm."
+                )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()  #ensures clean() runs
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.case_number} - {self.title}"
 
-class Document(BaseModel):
-    case = models.ForeignKey(
-        Case, on_delete=models.CASCADE, related_name="documents"
-    )
+class Document(models.Model):
+    case = models.ForeignKey("lawfirms.Case", on_delete=models.CASCADE)
     filename = models.CharField(max_length=255)
-    key = models.CharField(max_length=512)  # R2 object key
+    key = models.CharField(max_length=255)
     content_type = models.CharField(max_length=100)
     uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    def save(self, *args, **kwargs):
+        from apps.tenants.context import get_current_tenant
+        current_tenant = get_current_tenant()
+        if not current_tenant:
+            raise PermissionError("Tenant context missing")
+
+        if self.case.law_firm.tenant != current_tenant:
+            raise PermissionError("Cannot attach document to a case outside your tenant")
+        super().save(*args, **kwargs)

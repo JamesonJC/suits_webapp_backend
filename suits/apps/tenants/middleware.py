@@ -1,7 +1,7 @@
+# apps/tenants/middleware.py
 from django.http import JsonResponse
 from .models import Tenant
 from .context import set_current_tenant
-
 
 class TenantMiddleware:
     """
@@ -13,23 +13,18 @@ class TenantMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        tenant_code = request.headers.get("X-Tenant-Code")
+        request.tenant = None
+        set_current_tenant(None)
 
-        if not tenant_code:
-            request.tenant = None
-            set_current_tenant(None)
-            return self.get_response(request)
+        # Support normal headers AND DRF test client headers
+        tenant_code = request.headers.get("X-Tenant-Code") or request.META.get("HTTP_X_TENANT_CODE")
 
-        try:
-            tenant = Tenant.objects.get(code=tenant_code, active=True)
-        except Tenant.DoesNotExist:
-            return JsonResponse(
-                {"error": "Invalid or inactive tenant"},
-                status=400
-            )
+        if tenant_code:
+            try:
+                tenant = Tenant.objects.get(code=tenant_code, active=True)
+            except Tenant.DoesNotExist:
+                return JsonResponse({"error": "Invalid or inactive tenant"}, status=400)
+            request.tenant = tenant
+            set_current_tenant(tenant)
 
-        request.tenant = tenant
-        set_current_tenant(tenant)
-
-        response = self.get_response(request)
-        return response
+        return self.get_response(request)

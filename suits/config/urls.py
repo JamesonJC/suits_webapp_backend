@@ -29,20 +29,23 @@ from rest_framework_simplejwt.views import (
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from apps.tenants.views import TenantViewSet
-from apps.workflows.views import WorkflowTemplateViewSet
 from apps.lawfirms.views import LawFirmViewSet
+from apps.workflows.views import WorkflowStepViewSet, WorkflowTemplateViewSet
 
 router = DefaultRouter()
 
 router.register(r"tenants", TenantViewSet)
 #router.register(r"workflow-templates", WorkflowTemplateViewSet)
-router.register(r"workflow-templates", WorkflowTemplateViewSet, basename="workflowtemplate")
+#router.register(r"workflow-templates", WorkflowTemplateViewSet, basename="workflowtemplate")
 router.register(r"lawfirms", LawFirmViewSet, basename="lawfirm")
+router.register(r"workflows", WorkflowTemplateViewSet, basename="workflowtemplate")
+router.register(r'steps', WorkflowStepViewSet, basename='workflowstep')
 
 urlpatterns = [
-    path("admin/", admin.site.urls),
-    path("api/auth/login/", TokenObtainPairView.as_view()),
-    path("api/auth/refresh/", TokenRefreshView.as_view()),
+    path("api/auth/login/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
+    path("api/auth/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("api/", include("apps.workflows.urls")),
+    path("admin/", admin.site.urls),
     path("api/", include(router.urls)),
+    path("api/", include("apps.lawfirms.urls")), 
 ]

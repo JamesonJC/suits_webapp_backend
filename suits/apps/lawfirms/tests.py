@@ -1,47 +1,82 @@
 # apps/lawfirms/tests.py
-
-from django.test import TestCase
+from django.urls import reverse
+from rest_framework.test import APITestCase
+from django.contrib.auth import get_user_model
 from apps.tenants.models import Tenant
 from apps.tenants.context import set_current_tenant, clear_current_tenant
-from apps.users.models import User
-from apps.lawfirms.models import LawFirm, Attorney, Client, Case
+from .models import LawFirm, Attorney, Client, Case, Document
+
+User = get_user_model()
 
 
-class CaseIsolationTest(TestCase):
+class LawFirmTenantIsolationTests(APITestCase):
+
     def setUp(self):
-        # Create two tenants
+        # --- Create tenants ---
         self.tenant_a = Tenant.objects.create(name="Tenant A", code="TA")
         self.tenant_b = Tenant.objects.create(name="Tenant B", code="TB")
 
-        # --- LAW FIRM A ---
+        # --- Create firms in tenant context ---
         set_current_tenant(self.tenant_a)
-        self.law_firm_a = LawFirm.objects.create(name="Firm A", code="FIRMA")
-        self.user_a = User.objects.create_user(username="attorney_a", password="pass")
-        self.attorney_a = Attorney.objects.create(user=self.user_a, law_firm=self.law_firm_a)
-        self.client_a = Client.objects.create(law_firm=self.law_firm_a, first_name="Client", last_name="A")
-        self.case_a = Case.objects.create(law_firm=self.law_firm_a, client=self.client_a, case_number="A001", title="Case A")
+        self.firm_a = LawFirm.objects.create(name="Firm A", code="FA", tenant=self.tenant_a)
         clear_current_tenant()
 
-        # --- LAW FIRM B ---
         set_current_tenant(self.tenant_b)
-        self.law_firm_b = LawFirm.objects.create(name="Firm B", code="FIRMB")
-        self.user_b = User.objects.create_user(username="attorney_b", password="pass")
-        self.attorney_b = Attorney.objects.create(user=self.user_b, law_firm=self.law_firm_b)
-        self.client_b = Client.objects.create(law_firm=self.law_firm_b, first_name="Client", last_name="B")
-        self.case_b = Case.objects.create(law_firm=self.law_firm_b, client=self.client_b, case_number="B001", title="Case B")
+        self.firm_b = LawFirm.objects.create(name="Firm B", code="FB", tenant=self.tenant_b)
         clear_current_tenant()
 
-    def test_cannot_see_other_firm_cases(self):
-        # Test for Firm A
+        # --- Create user & attorney ---
+        self.user_a = User.objects.create_user(username="usera", password="pass")
         set_current_tenant(self.tenant_a)
-        cases_for_a = Case.objects.filter(law_firm=self.law_firm_a)
-        self.assertIn(self.case_a, cases_for_a)
-        self.assertNotIn(self.case_b, cases_for_a)
+        self.attorney_a = Attorney.objects.create(user=self.user_a, law_firm=self.firm_a)
         clear_current_tenant()
 
-        # Test for Firm B
-        set_current_tenant(self.tenant_b)
-        cases_for_b = Case.objects.filter(law_firm=self.law_firm_b)
-        self.assertIn(self.case_b, cases_for_b)
-        self.assertNotIn(self.case_a, cases_for_b)
+        # --- Authenticate via JWT ---
+        url = reverse("token_obtain_pair")  # DRF simplejwt endpoint
+        response = self.client.post(url, {"username": "usera", "password": "pass"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        token = response.data["access"]
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+    def test_client_creation_is_firm_safe(self):
+        url = reverse("client-list")
+        response = self.client.post(
+        reverse("client-list"),
+        {
+            "first_name": "John",
+            "last_name": "Doe",
+            # include other required fields if any
+        },
+        format="json"  # make sure DRF parses it as JSON
+        )
+        print(response.data)
+        self.assertEqual(response.status_code, 201)
+        set_current_tenant(self.tenant_a)
+        client = Client.objects.get(id=response.data["id"])
         clear_current_tenant()
+        self.assertEqual(client.law_firm, self.firm_a)
+
+    def test_cannot_access_other_firm_cases(self):
+        set_current_tenant(self.tenant_b)
+        client_b = Client.objects.create(first_name="Jane", last_name="Doe", law_firm=self.firm_b)
+        Case.objects.create(case_number="001", title="Secret Case", client=client_b, law_firm=self.firm_b)
+        clear_current_tenant()
+
+        url = reverse("case-list")
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 0)
+
+    def test_document_upload_restricted(self):
+        set_current_tenant(self.tenant_a)
+        client_obj = Client.objects.create(first_name="John", last_name="Doe", law_firm=self.firm_a)
+        case_obj = Case.objects.create(case_number="CASE1", title="Test Case", client=client_obj, law_firm=self.firm_a)
+        clear_current_tenant()
+
+        set_current_tenant(self.tenant_b)
+        client_b = Client.objects.create(first_name="Jane", last_name="Doe", law_firm=self.firm_b)
+        case_b = Case.objects.create(case_number="CASE2", title="Other Case", client=client_b, law_firm=self.firm_b)
+        clear_current_tenant()
+
+        with self.assertRaises(PermissionError):
+            Document.objects.create(case=case_b, filename="file.txt", key="abc", content_type="text/plain")
