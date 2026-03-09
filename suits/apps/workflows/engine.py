@@ -1,5 +1,20 @@
-from apps.jobs.models import Job
-from .models import WorkflowStep
+# apps/workflows/engine.py
+#
+# WorkflowEngine: handles moving a Case from one step to the next.
+#
+# HOW BRANCHING WORKS:
+# Each WorkflowStep can have multiple outgoing WorkflowTransitions.
+# A transition has optional condition_field + condition_value.
+# When advancing, you pass a `context` dict (e.g. {"decision": "APPROVED"}).
+# The engine evaluates transitions in priority order and takes the first match.
+# If condition_field is blank, the transition always matches (default path).
+#
+# EXAMPLE:
+#   Step "Review" has two transitions:
+#     1. condition_field="decision", condition_value="APPROVED" → step "Finalise"
+#     2. condition_field="decision", condition_value="REJECTED" → step "Revise"
+#   Calling advance(case, context={"decision": "APPROVED"}) goes to "Finalise".
+
 from django.db import transaction
 from apps.audit.services import log_action
 
@@ -8,48 +23,99 @@ class WorkflowEngine:
 
     @staticmethod
     @transaction.atomic
-    def move_to_next_step(job_id):
-        # Lock the job row for update
-        job = Job.objects.select_for_update().get(id=job_id)
+    def advance(case, context: dict = None):
+        """
+        Move `case` to its next workflow step based on transitions and context.
 
-        # Capture previous step
-        previous_step = job.current_step.step_name if job.current_step else None
+        Args:
+            case:    A Case instance (must have workflow_template and current_step set).
+            context: Dict of field→value pairs used to evaluate branching conditions.
+                     Example: {"decision": "APPROVED"}
 
-        # Determine next step
-        steps = WorkflowStep.objects.filter(
-            workflow_template=job.workflow_template
-        ).order_by("step_order")
+        Returns:
+            The updated Case instance.
 
-        if not job.current_step:
-            next_step = steps.first()
+        Raises:
+            Exception if no workflow is attached, or no matching transition found.
+        """
+        if context is None:
+            context = {}
+
+        # Lock the case row so concurrent requests don't double-advance
+        from apps.lawfirms.models import Case as CaseModel
+        case = CaseModel.unscoped.select_for_update().get(id=case.id)
+
+        if not case.workflow_template:
+            raise Exception(
+                f"Case '{case.code}' has no workflow attached. "
+                "Use 'Attach workflow' action first."
+            )
+
+        previous_step_name = case.current_step.name if case.current_step else None
+
+        # ── Find the next step ──────────────────────────────────────────────
+
+        if case.current_step is None:
+            # Case hasn't started yet — go to the very first step
+            next_step = (
+                case.workflow_template.steps
+                .order_by("order")
+                .first()
+            )
+            if not next_step:
+                raise Exception(
+                    f"Workflow '{case.workflow_template.name}' has no steps defined."
+                )
         else:
-            next_step = steps.filter(
-                step_order=job.current_step.step_order + 1
-            ).first()
+            # Evaluate outgoing transitions from the current step in priority order
+            transitions = case.current_step.outgoing_transitions.order_by("priority")
 
-        if not next_step:
-            raise Exception("No next step available")
+            if not transitions.exists():
+                raise Exception(
+                    f"No transitions defined from step '{case.current_step.name}'. "
+                    "Add a WorkflowTransition in admin to continue."
+                )
 
-        # Validate transition rules
-        WorkflowEngine.validate_transition(job, next_step)
+            next_step = None
+            for transition in transitions:
+                if transition.matches(context):
+                    next_step = transition.to_step
+                    break
 
-        # Update job to next step
-        job.current_step = next_step
-        job.status = next_step.step_name
-        job.save()
+            if not next_step:
+                raise Exception(
+                    f"No valid next step found from '{case.current_step.name}' "
+                    f"with context {context}. "
+                    "Check that transitions are configured correctly."
+                )
 
-        # Log the workflow transition
-        log_action(
-            action="TRANSITION",
-            instance=job,
-            before={"step": previous_step},
-            after={"step": job.current_step.step_name}
-        )
+        # ── Validate any gate conditions ────────────────────────────────────
 
-        return job
-
-    @staticmethod
-    def validate_transition(job, next_step):
         if next_step.requires_attachment:
-            if not hasattr(job, "attachments") or not job.attachments.exists():
-                raise Exception("Attachment required for this step")
+            if not case.attachments.exists():  # type: ignore[attr-defined]
+                raise Exception(
+                    f"Step '{next_step.name}' requires an attachment. "
+                    "Upload a file before advancing."
+                )
+
+        # ── Apply the transition ────────────────────────────────────────────
+
+        case.current_step = next_step
+        case.status = next_step.name
+        # Save only these two fields to avoid triggering full_clean cross-tenant checks
+        case.save_base(update_fields=["current_step", "status"])
+
+        # ── Audit log ───────────────────────────────────────────────────────
+
+        try:
+            log_action(
+                action="TRANSITION",
+                instance=case,
+                before={"step": previous_step_name},
+                after={"step": next_step.name},
+            )
+        except Exception:
+            # Never let audit failure block the actual transition
+            pass
+
+        return case

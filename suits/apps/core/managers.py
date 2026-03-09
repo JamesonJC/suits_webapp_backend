@@ -1,29 +1,35 @@
+# apps/core/managers.py
+
 from django.db import models
 from apps.tenants.context import get_current_tenant
 
-class TenantQuerySet(models.QuerySet):
-
-    def _filter_by_tenant(self):
-        tenant = get_current_tenant()
-        if tenant:
-            return super().filter(tenant=tenant)
-        return super()
-
-    def all(self):
-        return self._filter_by_tenant()
-
-    def filter(self, *args, **kwargs):
-        qs = super().filter(*args, **kwargs)
-        return qs._filter_by_tenant()
-
-    def get(self, *args, **kwargs):
-        return self._filter_by_tenant().get(*args, **kwargs)
 
 class TenantManager(models.Manager):
+    """
+    Default manager for all BaseModel subclasses.
+    Automatically filters every query to the current tenant stored in
+    thread-local context (set by TenantMiddleware from X-Tenant-Code header).
+    Returns .none() when no tenant is set — this is the safe default so
+    requests without a tenant header never leak cross-tenant data.
+    """
 
     def get_queryset(self):
         tenant = get_current_tenant()
         qs = super().get_queryset()
         if tenant:
             return qs.filter(tenant=tenant)
-        return qs.none()  # Safety: no tenant = no data
+        # No tenant context → return nothing (safe default)
+        return qs.none()
+
+
+class UnscopedManager(models.Manager):
+    """
+    Bypasses all tenant filtering.
+    USE ONLY IN:
+      - Django admin (TenantAdminMixin uses this)
+      - Internal services (WorkflowEngine, seed commands, tests)
+    Never expose this through API views.
+    """
+
+    def get_queryset(self):
+        return super().get_queryset()

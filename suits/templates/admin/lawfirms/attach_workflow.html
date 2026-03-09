@@ -1,0 +1,52 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+{# suits/templates/admin/lawfirms/attach_workflow.html
+   This page is shown when an admin selects cases and runs "Attach workflow".
+   It lists the selected cases and lets the admin pick a WorkflowTemplate.
+   On submit, lawfirms/admin.py → attach_workflow_view() does the actual save.
+#}
+
+<h1>Attach Workflow to Cases</h1>
+
+{% if messages %}
+  {% for message in messages %}
+    <p class="errornote">{{ message }}</p>
+  {% endfor %}
+{% endif %}
+
+<p>You are attaching a workflow to the following cases:</p>
+<ul>
+  {% for case in cases %}
+    <li><strong>{{ case.code }}</strong> — {{ case.title }} ({{ case.law_firm.name }})</li>
+  {% empty %}
+    <li><em>No cases selected.</em></li>
+  {% endfor %}
+</ul>
+
+<form method="post">
+  {% csrf_token %}
+  {# Pass selected IDs through to the POST handler #}
+  <input type="hidden" name="ids" value="{{ ids }}">
+
+  <fieldset class="module aligned">
+    <div class="form-row">
+      <label for="workflow_template_id"><strong>Workflow Template:</strong></label>
+      <select name="workflow_template_id" id="workflow_template_id" required>
+        <option value="">— Select a workflow —</option>
+        {% for template in templates %}
+          <option value="{{ template.id }}">
+            {{ template.name }} ({{ template.tenant.name }})
+          </option>
+        {% empty %}
+          <option disabled>No active workflow templates found</option>
+        {% endfor %}
+      </select>
+    </div>
+  </fieldset>
+
+  <div class="submit-row">
+    <input type="submit" value="Attach Workflow" class="default">
+    <a href=".." class="button cancel-link">Cancel</a>
+  </div>
+</form>
+{% endblock %}

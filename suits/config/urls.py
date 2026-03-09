@@ -1,51 +1,36 @@
-"""
-URL configuration for config project.
-
-The `urlpatterns` list routes URLs to views. For more information please see:
-    https://docs.djangoproject.com/en/6.0/topics/http/urls/
-Examples:
-Function views
-    1. Add an import:  from my_app import views
-    2. Add a URL to urlpatterns:  path('', views.home, name='home')
-Class-based views
-    1. Add an import:  from other_app.views import Home
-    2. Add a URL to urlpatterns:  path('', Home.as_view(), name='home')
-Including another URLconf
-    1. Import the include() function: from django.urls import include, path
-    2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
-"""
+# config/urls.py
 
 from django.contrib import admin
-#from django.urls import path
-
-#urlpatterns = [
-    #path("admin/", admin.site.urls),
-#]
-from django.urls import path
-from rest_framework_simplejwt.views import (
-    TokenObtainPairView,
-    TokenRefreshView,
-)
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+
 from apps.tenants.views import TenantViewSet
 from apps.lawfirms.views import LawFirmViewSet
-from apps.workflows.views import WorkflowStepViewSet, WorkflowTemplateViewSet
+
+# ✅ FIX: The original registered WorkflowTemplateViewSet and WorkflowStepViewSet
+#         BOTH in this router AND inside apps/workflows/urls.py (via include).
+#         That produced duplicate conflicting URL patterns.
+#
+#         Rule: each ViewSet is registered in exactly ONE place.
+#         - Workflows → apps/workflows/urls.py (included below)
+#         - Lawfirms  → apps/lawfirms/urls.py  (included below)
+#         - Tenants, LawFirms top-level → registered here in the main router
 
 router = DefaultRouter()
-
-router.register(r"tenants", TenantViewSet)
-#router.register(r"workflow-templates", WorkflowTemplateViewSet)
-#router.register(r"workflow-templates", WorkflowTemplateViewSet, basename="workflowtemplate")
+router.register(r"tenants",  TenantViewSet,  basename="tenant")
 router.register(r"lawfirms", LawFirmViewSet, basename="lawfirm")
-router.register(r"workflows", WorkflowTemplateViewSet, basename="workflowtemplate")
-router.register(r'steps', WorkflowStepViewSet, basename='workflowstep')
 
 urlpatterns = [
-    path("api/auth/login/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
-    path("api/auth/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
-    path("api/", include("apps.workflows.urls")),
+    # ── Auth ──────────────────────────────────────────────────────────────────
+    path("api/auth/login/",   TokenObtainPairView.as_view(), name="token_obtain_pair"),
+    path("api/auth/refresh/", TokenRefreshView.as_view(),    name="token_refresh"),
+
+    # ── Admin ─────────────────────────────────────────────────────────────────
     path("admin/", admin.site.urls),
-    path("api/", include(router.urls)),
-    path("api/", include("apps.lawfirms.urls")), 
+
+    # ── API routers ───────────────────────────────────────────────────────────
+    path("api/", include(router.urls)),              # /api/tenants/, /api/lawfirms/
+    path("api/", include("apps.workflows.urls")),    # /api/workflow-templates/, /api/steps/, /api/transitions/
+    path("api/", include("apps.lawfirms.urls")),     # /api/clients/, /api/cases/, /api/documents/
 ]
