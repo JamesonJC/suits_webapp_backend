@@ -1,19 +1,13 @@
 # apps/workflows/engine.py
 #
-# WorkflowEngine: handles moving a Case from one step to the next.
+# WorkflowEngine: applies attorney-chosen transitions to a case.
 #
-# HOW BRANCHING WORKS:
-# Each WorkflowStep can have multiple outgoing WorkflowTransitions.
-# A transition has optional condition_field + condition_value.
-# When advancing, you pass a `context` dict (e.g. {"decision": "APPROVED"}).
-# The engine evaluates transitions in priority order and takes the first match.
-# If condition_field is blank, the transition always matches (default path).
+# The attorney sees available options and picks one by transition_id.
+# The engine validates the choice and applies it. No automated decision-making.
 #
-# EXAMPLE:
-#   Step "Review" has two transitions:
-#     1. condition_field="decision", condition_value="APPROVED" → step "Finalise"
-#     2. condition_field="decision", condition_value="REJECTED" → step "Revise"
-#   Calling advance(case, context={"decision": "APPROVED"}) goes to "Finalise".
+# ALL queries use .unscoped (not .objects) because this engine is called
+# from admin actions and API views alike — admin has no tenant header so
+# TenantManager would return empty querysets.
 
 from django.db import transaction
 from apps.audit.services import log_action
@@ -23,99 +17,129 @@ class WorkflowEngine:
 
     @staticmethod
     @transaction.atomic
-    def advance(case, context: dict = None):
+    def advance(case, transition_id: int):
         """
-        Move `case` to its next workflow step based on transitions and context.
+        Move `case` to the next step by applying a specific transition
+        chosen by the attorney.
 
         Args:
-            case:    A Case instance (must have workflow_template and current_step set).
-            context: Dict of field→value pairs used to evaluate branching conditions.
-                     Example: {"decision": "APPROVED"}
+            case:          A Case instance with a workflow attached.
+            transition_id: The ID of the WorkflowTransition the attorney chose.
+                           Get available options first via get_available_transitions().
 
         Returns:
-            The updated Case instance.
+            Updated Case instance.
 
         Raises:
-            Exception if no workflow is attached, or no matching transition found.
+            Exception with a clear message on any invalid state.
         """
-        if context is None:
-            context = {}
-
-        # Lock the case row so concurrent requests don't double-advance
         from apps.lawfirms.models import Case as CaseModel
+        from apps.workflows.models import WorkflowTransition
+
+        # Lock the row — prevents two concurrent requests from double-advancing
         case = CaseModel.unscoped.select_for_update().get(id=case.id)
 
-        if not case.workflow_template:
+        if not case.workflow_template_id:
             raise Exception(
                 f"Case '{case.code}' has no workflow attached. "
-                "Use 'Attach workflow' action first."
+                "Assign a workflow_template to this case first."
             )
+
+        # Validate: the chosen transition must start from the case's current step
+        try:
+            transition = WorkflowTransition.unscoped.select_related("to_step").get(
+                id=transition_id
+            )
+        except WorkflowTransition.DoesNotExist:
+            raise Exception(f"Transition ID {transition_id} does not exist.")
+
+        if transition.from_step_id != case.current_step_id:
+            raise Exception(
+                f"Transition '{transition.label}' starts from "
+                f"'{transition.from_step.name}', but this case is currently on "
+                f"'{case.current_step.name if case.current_step else 'no step'}'. "
+                "Only transitions from the current step are valid."
+            )
+
+        next_step = transition.to_step
+
+        # Gate: check if the destination step requires an attachment
+        if next_step.requires_attachment:
+            if not case.documents.exists():
+                raise Exception(
+                    f"Step '{next_step.name}' requires an uploaded document. "
+                    "Upload a file to this case before advancing."
+                )
 
         previous_step_name = case.current_step.name if case.current_step else None
 
-        # ── Find the next step ──────────────────────────────────────────────
-
-        if case.current_step is None:
-            # Case hasn't started yet — go to the very first step
-            next_step = (
-                case.workflow_template.steps
-                .order_by("order")
-                .first()
-            )
-            if not next_step:
-                raise Exception(
-                    f"Workflow '{case.workflow_template.name}' has no steps defined."
-                )
-        else:
-            # Evaluate outgoing transitions from the current step in priority order
-            transitions = case.current_step.outgoing_transitions.order_by("priority")
-
-            if not transitions.exists():
-                raise Exception(
-                    f"No transitions defined from step '{case.current_step.name}'. "
-                    "Add a WorkflowTransition in admin to continue."
-                )
-
-            next_step = None
-            for transition in transitions:
-                if transition.matches(context):
-                    next_step = transition.to_step
-                    break
-
-            if not next_step:
-                raise Exception(
-                    f"No valid next step found from '{case.current_step.name}' "
-                    f"with context {context}. "
-                    "Check that transitions are configured correctly."
-                )
-
-        # ── Validate any gate conditions ────────────────────────────────────
-
-        if next_step.requires_attachment:
-            if not case.attachments.exists():  # type: ignore[attr-defined]
-                raise Exception(
-                    f"Step '{next_step.name}' requires an attachment. "
-                    "Upload a file before advancing."
-                )
-
-        # ── Apply the transition ────────────────────────────────────────────
-
+        # Apply the transition
         case.current_step = next_step
-        case.status = next_step.name
-        # Save only these two fields to avoid triggering full_clean cross-tenant checks
-        case.save_base(update_fields=["current_step", "status"])
+        case.status       = next_step.name
+        case.save_base(update_fields=["current_step", "status", "updated_at"])
 
-        # ── Audit log ───────────────────────────────────────────────────────
-
+        # Audit log (non-blocking — never let this break the transition)
         try:
             log_action(
                 action="TRANSITION",
                 instance=case,
                 before={"step": previous_step_name},
-                after={"step": next_step.name},
+                after={"step": next_step.name, "transition": transition.label},
             )
         except Exception:
-            # Never let audit failure block the actual transition
+            pass
+
+        return case
+
+    @staticmethod
+    @transaction.atomic
+    def start(case):
+        """
+        Place a case on step 1 of its workflow.
+        Called automatically by Case.save() when workflow_template is first set.
+        Can also be called manually to reset a case to the beginning.
+
+        Args:
+            case: A Case instance with workflow_template set.
+
+        Returns:
+            Updated Case instance.
+        """
+        from apps.lawfirms.models import Case as CaseModel
+        from apps.workflows.models import WorkflowStep
+
+        case = CaseModel.unscoped.select_for_update().get(id=case.id)
+
+        if not case.workflow_template_id:
+            raise Exception("Cannot start: no workflow_template set on this case.")
+
+        first_step = (
+            WorkflowStep.unscoped
+            .filter(workflow_id=case.workflow_template_id)
+            .order_by("order")
+            .first()
+        )
+
+        if not first_step:
+            raise Exception(
+                f"Workflow '{case.workflow_template.name}' has no steps. "
+                "Add steps in Admin → Workflow Templates (steps are inline)."
+            )
+
+        previous = case.current_step.name if case.current_step else None
+
+        case.current_step = first_step
+        case.status       = first_step.name
+        case.save_base(update_fields=["current_step", "status", "updated_at"])
+
+        try:
+            log_action(
+                action="TRANSITION",
+                instance=case,
+                before={"step": previous},
+                after={"step": first_step.name, "transition": "Workflow started"},
+            )
+        except Exception:
             pass
 
         return case
