@@ -1,475 +1,256 @@
-# Suits Backend — Fly.io Deployment Guide
+# Suits Backend — Render Deployment Guide
 
-> Step-by-step guide to deploy the Django backend to Fly.io with PostgreSQL,
-> GitHub Actions CI/CD, and full React frontend readiness.
+> Deploy the Django backend to Render.com with PostgreSQL,
+> GitHub Actions CI/CD, and React frontend readiness.
 >
-> **Stack:** Django 6.0.2 · DRF · PostgreSQL · Cloudflare R2 · JWT Auth · Fly.io
+> **Stack:** Django 6.0.2 · Gunicorn · WhiteNoise · PostgreSQL · Render
 
 ---
 
-## Overview of What We're Setting Up
+## What Render Does For You (vs OCI)
+
+```
+Render handles automatically:          You handled manually on OCI:
+✅ SSL certificate (HTTPS)              nginx + certbot
+✅ Deploy on git push                   GitHub Actions SSH
+✅ Managed Postgres                     apt install postgresql
+✅ Zero-downtime deploys                systemd + careful restart
+✅ Logs in dashboard                    journalctl
+✅ Custom domains                       DNS config
+```
+
+Render is simpler but less flexible. Perfect for getting your API
+live fast so you can focus on building the React frontend.
+
+---
+
+## Architecture on Render
 
 ```
 GitHub (push to main)
-    ↓
-GitHub Actions (run tests → deploy)
-    ↓
-Fly.io (runs Django + Gunicorn)
-    ↓
-Fly Postgres (your database)
-    ↓
-Cloudflare R2 (file storage)
+        ↓
+Render detects the push
+        ↓
+build.sh runs:
+  - pip install -r requirements.txt
+  - python manage.py migrate
+  - python manage.py collectstatic
+        ↓
+Gunicorn starts (Render manages this)
+        ↓
+Your API is live at https://suits-backend.onrender.com
+        ↓
+React frontend calls the API using that URL
 ```
-
-React frontend connects to your Fly.io URL via the REST API.
 
 ---
 
-## PART 1 — Production Settings
+## PART 1 — File Changes (Do These First Locally)
 
-Right now `config/settings.py` has `DEBUG = True` and a hardcoded `SECRET_KEY`.
-We need to split settings into dev and production safely.
+### Files to update in your repo:
 
-### Step 1.1 — Install python-decouple
+| File | What changed |
+|------|-------------|
+| `suits/config/settings.py` | Full rewrite — env-based config |
+| `suits/requirements.txt` | Added gunicorn, whitenoise, dj-database-url, python-decouple |
+| `suits/build.sh` | New file — Render runs this on every deploy |
+| `suits/.env.example` | New file — template for local dev (commit this, not .env) |
 
-This lets us read secrets from environment variables (Fly.io secrets) without
-touching the code.
+### Step 1.1 — Apply the file changes
 
-```bash
-pip install python-decouple
-pip freeze > requirements.txt
-```
+Replace these files with the ones provided:
+- `suits/config/settings.py`
+- `suits/requirements.txt`
+- Create `suits/build.sh`
+- Create `suits/.env.example`
 
-### Step 1.2 — Update config/settings.py
-
-Replace the top of your `config/settings.py` with this. The comments explain
-every change and why it matters.
-
-```python
-# config/settings.py
-
-from pathlib import Path
-from datetime import timedelta
-import os
-from decouple import config, Csv  # reads from env vars or .env file
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-
-# ─── Security ────────────────────────────────────────────────────────────────
-# SECRET_KEY: In dev, falls back to the insecure default.
-# In production (Fly.io), this MUST be set as a secret — never hardcode it.
-SECRET_KEY = config("SECRET_KEY", default="django-insecure-change-me-in-production")
-
-# DEBUG: False in production. Fly.io sets DEBUG=False automatically.
-# Never run with DEBUG=True on a public server — it exposes your full stack trace.
-DEBUG = config("DEBUG", default=False, cast=bool)
-
-# ALLOWED_HOSTS: Which domain names Django will respond to.
-# In production this must be your Fly.io domain (e.g. suits.fly.dev).
-# Csv() lets you pass multiple hosts as a comma-separated string.
-ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1", cast=Csv())
-
-# ─── Apps ────────────────────────────────────────────────────────────────────
-INSTALLED_APPS = [
-    'django.contrib.admin',
-    'django.contrib.auth',
-    'django.contrib.contenttypes',
-    'django.contrib.sessions',
-    'django.contrib.messages',
-    'django.contrib.staticfiles',
-    'django_filters',
-    'rest_framework',
-    'corsheaders',
-    'apps.core',
-    'apps.tenants',
-    'apps.lawfirms',
-    'apps.users',
-    'apps.rbac',
-    'apps.forms_engine',
-    'apps.jobs',
-    'apps.api',
-    'apps.workflows',
-    'apps.audit',
-]
-
-# ─── Middleware ───────────────────────────────────────────────────────────────
-MIDDLEWARE = [
-    "django.middleware.security.SecurityMiddleware",
-    "whitenoise.middleware.WhiteNoiseMiddleware",  # serves static files in production
-    "django.contrib.sessions.middleware.SessionMiddleware",
-    "corsheaders.middleware.CorsMiddleware",       # must be before CommonMiddleware
-    "django.middleware.common.CommonMiddleware",
-    "django.middleware.csrf.CsrfViewMiddleware",
-    "django.contrib.auth.middleware.AuthenticationMiddleware",
-    "apps.tenants.middleware.TenantMiddleware",
-    "apps.audit.middleware.AuditMiddleware",
-    "django.contrib.messages.middleware.MessageMiddleware",
-    "django.middleware.clickjacking.XFrameOptionsMiddleware",
-]
-
-# ─── REST Framework ───────────────────────────────────────────────────────────
-REST_FRAMEWORK = {
-    "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework.authentication.SessionAuthentication",
-        "rest_framework.authentication.BasicAuthentication",
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
-    ),
-    "DEFAULT_PERMISSION_CLASSES": (
-        "rest_framework.permissions.IsAuthenticated",
-    ),
-    "DEFAULT_FILTER_BACKENDS": (
-        "django_filters.rest_framework.DjangoFilterBackend",
-    ),
-}
-
-SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
-}
-
-# ─── CORS (Cross-Origin Resource Sharing) ────────────────────────────────────
-# This controls which domains can call your API from a browser.
-# Your React frontend domain goes here.
-# CORS_ALLOWED_ORIGINS is read from env so you can change it without redeploying.
-CORS_ALLOWED_ORIGINS = config(
-    "CORS_ALLOWED_ORIGINS",
-    default="http://localhost:3000,http://localhost:5173",  # Vite + CRA defaults
-    cast=Csv()
-)
-
-# Allow the React frontend to send the X-Tenant-Code header with every request
-CORS_ALLOW_HEADERS = [
-    "accept",
-    "accept-encoding",
-    "authorization",
-    "content-type",
-    "dnt",
-    "origin",
-    "user-agent",
-    "x-csrftoken",
-    "x-requested-with",
-    "x-tenant-code",   # ← your custom multi-tenant header
-]
-
-# ─── Database ─────────────────────────────────────────────────────────────────
-# In development: SQLite (simple, no setup needed).
-# In production (Fly.io): PostgreSQL, connection string from DATABASE_URL env var.
-DATABASE_URL = config("DATABASE_URL", default=None)
-
-if DATABASE_URL:
-    # Production: parse the Fly.io Postgres connection string automatically
-    import dj_database_url
-    DATABASES = {
-        "default": dj_database_url.parse(DATABASE_URL, conn_max_age=600)
-    }
-else:
-    # Development: SQLite
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.sqlite3",
-            "NAME": BASE_DIR / "db.sqlite3",
-        }
-    }
-
-# ─── Cloudflare R2 Storage ────────────────────────────────────────────────────
-CLOUDFLARE_R2_KEY_ID     = config("CLOUDFLARE_R2_KEY_ID",     default="")
-CLOUDFLARE_R2_SECRET_KEY = config("CLOUDFLARE_R2_SECRET_KEY", default="")
-CLOUDFLARE_R2_BUCKET     = config("CLOUDFLARE_R2_BUCKET",     default="")
-CLOUDFLARE_R2_ACCOUNT_ID = config("CLOUDFLARE_R2_ACCOUNT_ID", default="")
-
-# ─── Static Files ─────────────────────────────────────────────────────────────
-# WhiteNoise serves static files directly from Gunicorn — no Nginx needed.
-STATIC_URL  = "/static/"
-STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
-STATICFILES_DIRS = [os.path.join(BASE_DIR, "static")] if os.path.exists(os.path.join(BASE_DIR, "static")) else []
-STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
-
-# ─── Auth ─────────────────────────────────────────────────────────────────────
-AUTH_USER_MODEL = "users.User"
-
-ROOT_URLCONF = "config.urls"
-
-TEMPLATES = [
-    {
-        "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [BASE_DIR / "templates"],
-        "APP_DIRS": True,
-        "OPTIONS": {
-            "context_processors": [
-                "django.template.context_processors.request",
-                "django.contrib.auth.context_processors.auth",
-                "django.contrib.messages.context_processors.messages",
-            ],
-        },
-    },
-]
-
-WSGI_APPLICATION = "config.wsgi.application"
-
-AUTH_PASSWORD_VALIDATORS = [
-    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
-    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
-    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
-    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
-]
-
-LANGUAGE_CODE = "en-us"
-TIME_ZONE     = "UTC"
-USE_I18N      = True
-USE_TZ        = True
-
-DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
-```
-
-### Step 1.3 — Install new dependencies
+### Step 1.2 — Create your local .env (do NOT commit this)
 
 ```bash
-pip install whitenoise dj-database-url
-pip freeze > requirements.txt
+cd suits
+cp .env.example .env
+# Edit .env and fill in your values
 ```
 
-- **whitenoise**: serves your Django static files (admin CSS, etc.) without needing a separate web server
-- **dj-database-url**: parses the `DATABASE_URL` connection string Fly.io gives you
+Make sure `.env` is in your `.gitignore` — it already is in your project.
 
-### Step 1.4 — Create a .env file for local development
-
-Create a file called `.env` in the `suits/` directory (same level as `manage.py`).
-This is already in your `.gitignore` — it will never be committed.
+### Step 1.3 — Make build.sh executable
 
 ```bash
-# suits/.env  ← never commit this file
-
-SECRET_KEY=any-random-string-for-local-dev
-DEBUG=True
-ALLOWED_HOSTS=localhost,127.0.0.1
-
-# Leave these blank for local dev — R2 only used in production
-CLOUDFLARE_R2_KEY_ID=
-CLOUDFLARE_R2_SECRET_KEY=
-CLOUDFLARE_R2_BUCKET=
-CLOUDFLARE_R2_ACCOUNT_ID=
+chmod +x suits/build.sh
 ```
 
-Test it works:
+### Step 1.4 — Test locally before pushing
+
 ```bash
+cd suits
+pip install -r requirements.txt
 python manage.py check
 python manage.py runserver
 ```
 
+### Step 1.5 — Commit and push
+
+```bash
+git add suits/config/settings.py suits/requirements.txt suits/build.sh suits/.env.example
+git commit -m "feat(deploy): add Render deployment config — settings, build script, requirements"
+git push origin main
+```
+
 ---
 
-## PART 2 — Fly.io Setup
+## PART 2 — Set Up Render
 
-### Step 2.1 — Install the Fly CLI
+### Step 2.1 — Create a Render Account
 
-```bash
-# macOS
-brew install flyctl
+Go to https://render.com and sign up with your GitHub account.
+This lets Render access your repos directly.
 
-# Linux / Windows WSL
-curl -L https://fly.io/install.sh | sh
+### Step 2.2 — Create a PostgreSQL Database
+
+Render's free Postgres tier is perfect for getting started.
+
+1. In the Render dashboard click **New → PostgreSQL**
+2. Fill in:
+   ```
+   Name:    suits-db
+   Region:  Frankfurt (EU) or Singapore — closest to your users
+   Plan:    Free
+   ```
+3. Click **Create Database**
+4. Wait for it to spin up (about 1 minute)
+5. On the database page, find **Internal Database URL** — copy it.
+   It looks like:
+   ```
+   postgresql://suits_db_user:xxxxx@dpg-xxxxx/suits_db
+   ```
+   Keep this — you'll paste it into the web service next.
+
+> **Important:** Render's free Postgres databases are deleted after
+> 90 days of inactivity. Upgrade to paid ($7/month) for production use.
+
+### Step 2.3 — Create the Web Service
+
+1. Click **New → Web Service**
+2. Connect your GitHub repo (`suits_webapp_backend`)
+3. Fill in the settings:
+
+```
+Name:               suits-backend
+Region:             Same as your database
+Branch:             main
+Root Directory:     suits          ← important! your Django app is in /suits
+Runtime:            Python 3
+Build Command:      chmod +x build.sh && ./build.sh
+Start Command:      gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 2
+Plan:               Free (or Starter for always-on)
 ```
 
-Log in:
+> **Note on free plan:** Render's free web service spins down after
+> 15 minutes of inactivity and takes ~30 seconds to wake up on the
+> next request. For a backend that React calls, upgrade to Starter
+> ($7/month) for always-on. Your choice.
+
+4. Click **Create Web Service** — but don't let it build yet.
+   We need to add environment variables first.
+
+### Step 2.4 — Add Environment Variables
+
+On your web service page, go to **Environment → Environment Variables**.
+Add these one by one:
+
+| Key | Value |
+|-----|-------|
+| `SECRET_KEY` | Generate one (see below) |
+| `DEBUG` | `False` |
+| `ALLOWED_HOSTS` | `suits-backend.onrender.com` |
+| `DATABASE_URL` | Paste the Internal Database URL from Step 2.2 |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:3000` (update when React is deployed) |
+| `CLOUDFLARE_R2_KEY_ID` | Your R2 key |
+| `CLOUDFLARE_R2_SECRET_KEY` | Your R2 secret |
+| `CLOUDFLARE_R2_BUCKET` | Your bucket name |
+| `CLOUDFLARE_R2_ACCOUNT_ID` | Your account ID |
+
+**Generate a SECRET_KEY:**
 ```bash
-fly auth login
-```
-
-### Step 2.2 — Review fly.toml
-
-Your `fly.toml` is already set up. Here is the final version with a few
-important additions explained:
-
-```toml
-# fly.toml
-app            = 'suits'
-primary_region = 'sin'           # Singapore — change to your closest region
-console_command = '/code/manage.py shell'
-
-[build]
-
-[deploy]
-  # Runs database migrations automatically on every deploy BEFORE traffic switches.
-  # This means your DB is always up to date before new code goes live.
-  release_command = 'python manage.py migrate --noinput'
-
-[env]
-  PORT = '8000'
-  # These non-secret env vars can live here.
-  # SECRET values (passwords, keys) go in fly secrets — never in this file.
-  DJANGO_SETTINGS_MODULE = 'config.settings'
-
-[http_service]
-  internal_port      = 8000
-  force_https        = true        # always redirect HTTP → HTTPS
-  auto_stop_machines = 'stop'      # scale to zero when no traffic (saves money)
-  auto_start_machines = true       # wake up automatically on new request
-  min_machines_running = 0
-  processes          = ['app']
-
-  # Health check — Fly.io pings this to confirm the app started correctly
-  [[http_service.checks]]
-    grace_period  = "10s"
-    interval      = "30s"
-    method        = "GET"
-    timeout       = "5s"
-    path          = "/admin/login/"
-
-[[vm]]
-  memory = '1gb'
-  cpus   = 1
-
-[[statics]]
-  guest_path = '/code/staticfiles'    # matches STATIC_ROOT in settings
-  url_prefix = '/static/'
-```
-
-### Step 2.3 — Create a Fly Postgres Database
-
-This creates a managed PostgreSQL database attached to your app.
-
-```bash
-# Create the database (free tier)
-fly postgres create --name suits-db --region sin
-
-# Attach it to your app — this automatically sets DATABASE_URL as a secret
-fly postgres attach suits-db --app suits
-```
-
-After this, your app automatically has `DATABASE_URL` set. You can verify:
-```bash
-fly secrets list --app suits
-# You should see DATABASE_URL listed
-```
-
-### Step 2.4 — Set Production Secrets on Fly.io
-
-These are environment variables that are encrypted and injected into your
-running container. Never put secrets in fly.toml or your code.
-
-```bash
-# Generate a strong secret key first (run this in your terminal)
 python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
-
-# Set all your secrets at once
-fly secrets set \
-  SECRET_KEY="<paste the key generated above>" \
-  DEBUG="False" \
-  ALLOWED_HOSTS="suits.fly.dev" \
-  CORS_ALLOWED_ORIGINS="https://your-react-app.vercel.app,https://your-react-app.com" \
-  CLOUDFLARE_R2_KEY_ID="<your R2 key>" \
-  CLOUDFLARE_R2_SECRET_KEY="<your R2 secret>" \
-  CLOUDFLARE_R2_BUCKET="<your bucket name>" \
-  CLOUDFLARE_R2_ACCOUNT_ID="<your account ID>" \
-  --app suits
 ```
 
-> **Note:** When you set secrets, Fly.io automatically redeploys your app.
+### Step 2.5 — Trigger First Deploy
 
-### Step 2.5 — Update the Dockerfile
+Click **Manual Deploy → Deploy latest commit**.
 
-Your Dockerfile needs a small update — whitenoise needs to collect static files:
-
-```dockerfile
-ARG PYTHON_VERSION=3.12-slim
-
-FROM python:${PYTHON_VERSION}
-
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
-
-RUN apt-get update && apt-get install -y \
-    libpq-dev \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN mkdir -p /code
-WORKDIR /code
-
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --upgrade pip && \
-    pip install -r /tmp/requirements.txt && \
-    rm -rf /root/.cache/
-
-COPY . /code
-
-# Collect static files (admin CSS, etc.) into staticfiles/
-# SECRET_KEY is only needed here to run collectstatic — not the real production key
-ENV SECRET_KEY "build-time-placeholder-not-real"
-RUN python manage.py collectstatic --noinput
-
-EXPOSE 8000
-
-CMD ["gunicorn", "--bind", ":8000", "--workers", "2", "config.wsgi"]
+Watch the logs — you'll see:
+```
+▶ Installing dependencies...
+▶ Running migrations...
+  Applying tenants.0001_initial... OK
+  ...
+▶ Collecting static files...
+✅ Build complete.
+==> Starting service with gunicorn...
 ```
 
-### Step 2.6 — First Manual Deploy
+Once you see `Your service is live`, your API is at:
+```
+https://suits-backend.onrender.com
+```
 
+### Step 2.6 — Create Your Superuser
+
+Render has a shell you can access from the dashboard:
+
+1. Go to your web service
+2. Click **Shell** tab
+3. Run:
 ```bash
-cd suits   # make sure you're in the directory with fly.toml
-
-fly deploy
-```
-
-Watch the output — you'll see it:
-1. Build the Docker image
-2. Run migrations (`python manage.py migrate`)
-3. Start the new version
-4. Switch traffic to it
-
-Check it's running:
-```bash
-fly status --app suits
-fly logs --app suits
-```
-
-Create your superuser:
-```bash
-fly ssh console --app suits
 python manage.py createsuperuser
 ```
 
-Your admin is now live at: `https://suits.fly.dev/admin/`
+Your admin is now at:
+```
+https://suits-backend.onrender.com/admin/
+```
 
 ---
 
 ## PART 3 — GitHub Actions CI/CD
 
-This sets up automatic testing and deployment every time you push to `main`.
+Render auto-deploys on every push to main already. GitHub Actions adds
+automatic **testing** before the deploy goes live — so broken code
+never reaches production.
 
-### Step 3.1 — Get your Fly.io Deploy Token
+### Step 3.1 — Get a Render Deploy Hook
 
-```bash
-fly tokens create deploy --app suits
-```
+1. On your Render web service, go to **Settings → Deploy Hook**
+2. Copy the URL — it looks like:
+   ```
+   https://api.render.com/deploy/srv-xxxxx?key=xxxxx
+   ```
 
-Copy the token — you'll paste it into GitHub next.
+### Step 3.2 — Add Secret to GitHub
 
-### Step 3.2 — Add the Token to GitHub Secrets
+Go to your GitHub repo → **Settings → Secrets and variables → Actions → New repository secret**
 
-1. Go to your GitHub repo
-2. Click **Settings** → **Secrets and variables** → **Actions**
-3. Click **New repository secret**
-4. Name: `FLY_API_TOKEN`
-5. Value: paste the token from step 3.1
+| Name | Value |
+|------|-------|
+| `RENDER_DEPLOY_HOOK` | The URL from step 3.1 |
 
-### Step 3.3 — Create the GitHub Actions Workflow
-
-Create this file in your repo. GitHub reads it automatically.
+### Step 3.3 — Create the Workflow File
 
 ```bash
 mkdir -p .github/workflows
 ```
 
+Create `.github/workflows/deploy.yml`:
+
 ```yaml
 # .github/workflows/deploy.yml
 #
-# This workflow runs on every push to main.
-# It does two things in order:
-#   1. TEST  — runs your Django test suite in a clean environment
-#   2. DEPLOY — if tests pass, deploys to Fly.io
-#
-# If tests fail, deploy is skipped. Your production app is always safe.
+# On every push to main:
+#   1. Run Django tests against a real PostgreSQL database
+#   2. If tests pass → trigger Render to deploy
+#   3. If tests fail → deploy is blocked
 
 name: Test and Deploy
 
@@ -477,24 +258,22 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]   # also run tests on pull requests (no deploy)
+    branches: [main]
 
 jobs:
-  # ─── Job 1: Tests ──────────────────────────────────────────────────────────
+  # ─── Run Tests ──────────────────────────────────────────────────────────────
   test:
     name: Run Tests
     runs-on: ubuntu-latest
 
     services:
-      # Spin up a real PostgreSQL for tests (mirrors production)
       postgres:
         image: postgres:15
         env:
           POSTGRES_DB: suits_test
           POSTGRES_USER: suits
           POSTGRES_PASSWORD: suits
-        ports:
-          - 5432:5432
+        ports: ["5432:5432"]
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -502,26 +281,22 @@ jobs:
           --health-retries 5
 
     env:
-      SECRET_KEY: "ci-test-secret-key-not-real"
+      SECRET_KEY: "ci-test-key-not-real"
       DEBUG: "True"
-      ALLOWED_HOSTS: "localhost,127.0.0.1"
+      ALLOWED_HOSTS: "localhost"
       DATABASE_URL: "postgresql://suits:suits@localhost:5432/suits_test"
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
 
       - name: Install dependencies
         working-directory: suits
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Run migrations
         working-directory: suits
@@ -531,178 +306,153 @@ jobs:
         working-directory: suits
         run: python manage.py test --verbosity=2
 
-  # ─── Job 2: Deploy ──────────────────────────────────────────────────────────
+  # ─── Deploy to Render ───────────────────────────────────────────────────────
   deploy:
-    name: Deploy to Fly.io
+    name: Deploy to Render
     runs-on: ubuntu-latest
-    needs: test                          # only run if tests passed
-    if: github.ref == 'refs/heads/main'  # only deploy from main branch, not PRs
+    needs: test                           # only if tests pass
+    if: github.ref == 'refs/heads/main'   # only from main, not PRs
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Fly CLI
-        uses: superfly/flyctl-actions/setup-flyctl@master
-
-      - name: Deploy to Fly.io
-        working-directory: suits
-        run: flyctl deploy --remote-only
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Trigger Render Deploy
+        run: |
+          curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"
+          echo "✅ Deploy triggered on Render"
 ```
 
-### Step 3.4 — How the CI/CD Flow Works
-
-```
-You push to main
-        ↓
-GitHub Actions starts
-        ↓
-Job 1: Tests run against PostgreSQL
-  ✅ Pass → Job 2 starts
-  ❌ Fail → Deploy skipped, you get an email
-        ↓
-Job 2: fly deploy runs
-  → Builds Docker image on Fly.io servers
-  → Runs: python manage.py migrate
-  → Starts new container
-  → Switches traffic (zero downtime)
-        ↓
-Your app is live with the new code
-```
+Commit and push this file. From now on:
+- Every PR → tests run, no deploy
+- Every merge to main → tests run, then Render deploys
 
 ---
 
-## PART 4 — React Frontend Readiness
+## PART 4 — React Frontend Connection
 
-### Step 4.1 — How the React App Connects
-
-Every API request from React needs two headers:
+### The two headers every React request must send
 
 ```javascript
-// Every request must include:
-headers: {
-  "Authorization": `Bearer ${accessToken}`,   // JWT token from /api/auth/login/
-  "X-Tenant-Code": "T1",                       // your tenant code
-  "Content-Type": "application/json",
+// src/lib/api.js
+
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+// For Create React App use: process.env.REACT_APP_API_URL
+
+export async function apiRequest(path, options = {}, tenantCode) {
+  const token = localStorage.getItem("access_token");
+
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      // JWT token — required for all protected endpoints
+      "Authorization": token ? `Bearer ${token}` : "",
+      // Your multi-tenant header — required for ALL requests
+      "X-Tenant-Code": tenantCode,
+      ...options.headers,
+    },
+  });
+
+  return response;
 }
 ```
 
-### Step 4.2 — API Base URL by Environment
+### Login and store the token
 
 ```javascript
-// In your React app (e.g. src/config.js)
-const API_BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:8000";
-
-// Usage
-const response = await fetch(`${API_BASE_URL}/api/cases/`, { headers });
+async function login(username, password, tenantCode) {
+  const res = await fetch(`${API_BASE}/api/auth/login/`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Tenant-Code": tenantCode,
+    },
+    body: JSON.stringify({ username, password }),
+  });
+  const data = await res.json();
+  localStorage.setItem("access_token", data.access);
+  localStorage.setItem("refresh_token", data.refresh);
+}
 ```
 
-Set the env var in your React deployment:
-- **Local dev**: `REACT_APP_API_URL=http://localhost:8000`
-- **Production**: `REACT_APP_API_URL=https://suits.fly.dev`
+### Set API URL per environment
 
-### Step 4.3 — Update CORS When You Deploy React
-
-When you deploy the React app, come back and update the CORS secret:
-
-```bash
-fly secrets set \
-  CORS_ALLOWED_ORIGINS="https://your-react-app.vercel.app" \
-  --app suits
+**.env.local** (local dev):
+```
+VITE_API_URL=http://localhost:8000
 ```
 
-### Step 4.4 — Key API Endpoints for React
-
+**.env.production** (deployed React):
 ```
-# Auth
-POST   /api/auth/login/         body: {username, password}  → returns {access, refresh}
-POST   /api/auth/refresh/       body: {refresh}             → returns {access}
-
-# Cases
-GET    /api/cases/                           list cases for this tenant
-POST   /api/cases/                           create a case
-GET    /api/cases/{id}/workflow_status/      current step + available transitions
-POST   /api/cases/{id}/attach_workflow/      body: {workflow_template_id}
-POST   /api/cases/{id}/advance_step/         body: {transition_id}
-
-# Workflow
-GET    /api/workflow-templates/              list templates for this tenant
-GET    /api/steps/                           list steps
-GET    /api/transitions/                     list transitions
-
-# Law Firms
-GET    /api/clients/
-GET    /api/attorneys/
-GET    /api/documents/
+VITE_API_URL=https://suits-backend.onrender.com
 ```
+
+### Update CORS when React is deployed
+
+Once your React app is deployed (Vercel, Netlify etc.), add its URL to Render:
+
+Render Dashboard → suits-backend → **Environment → Environment Variables**
+```
+CORS_ALLOWED_ORIGINS = https://your-react-app.vercel.app,http://localhost:3000
+```
+
+Render auto-redeploys when you save env var changes.
 
 ---
 
-## PART 5 — Making Changes Safely
+## PART 5 — Key API Endpoints Reference
 
-### Workflow for every change
-
-```bash
-# 1. Create a branch
-git checkout -b feature/your-feature-name
-
-# 2. Make your changes and test locally
-python manage.py test
-
-# 3. If you changed models, create a migration
-python manage.py makemigrations
-python manage.py migrate
-
-# 4. Commit
-git add .
-git commit -m "feat: your change description"
-
-# 5. Open a Pull Request → tests run automatically
-# 6. Merge to main → deploys automatically
 ```
+# Authentication
+POST  /api/auth/login/              {username, password}  → {access, refresh}
+POST  /api/auth/refresh/            {refresh}             → {access}
 
-### Emergency: Roll Back a Deploy
+# Cases & Workflow
+GET   /api/cases/                   list cases
+POST  /api/cases/                   create case
+GET   /api/cases/{id}/workflow_status/     current step + available transitions
+POST  /api/cases/{id}/attach_workflow/     {workflow_template_id}
+POST  /api/cases/{id}/advance_step/        {transition_id}
 
-```bash
-# See recent deploys
-fly releases --app suits
+# Workflow Templates
+GET   /api/workflow-templates/      list templates
+GET   /api/steps/                   list steps
+GET   /api/transitions/             list transitions
 
-# Roll back to the previous version
-fly deploy --image <image-id-from-previous-release>
-```
-
-### Check Production Logs
-
-```bash
-fly logs --app suits          # live logs
-fly logs --app suits -n 100   # last 100 lines
-```
-
-### Run Django Commands in Production
-
-```bash
-fly ssh console --app suits
-python manage.py shell
-python manage.py createsuperuser
-python manage.py migrate
+# Law Firm
+GET   /api/clients/
+GET   /api/attorneys/
+GET   /api/lawfirms/
+GET   /api/documents/
 ```
 
 ---
 
 ## Summary Checklist
 
-- [ ] `pip install python-decouple whitenoise dj-database-url`
-- [ ] Update `config/settings.py` with env-based config
-- [ ] Create `suits/.env` for local dev
-- [ ] Update `Dockerfile` (collectstatic fix)
-- [ ] Update `fly.toml` (health check + statics path)
-- [ ] `fly postgres create` + `fly postgres attach`
-- [ ] `fly secrets set` (SECRET_KEY, DEBUG, ALLOWED_HOSTS, CORS, R2 keys)
-- [ ] `fly deploy` (first manual deploy)
-- [ ] `fly ssh console` → `createsuperuser`
-- [ ] Add `FLY_API_TOKEN` to GitHub repo secrets
+**Local Changes**
+- [ ] Replace `suits/config/settings.py`
+- [ ] Replace `suits/requirements.txt`
+- [ ] Create `suits/build.sh` and run `chmod +x suits/build.sh`
+- [ ] Create `suits/.env.example`
+- [ ] Create `suits/.env` (from .env.example, never commit)
+- [ ] `pip install -r requirements.txt`
+- [ ] `python manage.py check` — confirm no errors
+- [ ] Commit and push
+
+**Render Setup**
+- [ ] Create Render account (connect GitHub)
+- [ ] Create PostgreSQL database (free tier)
+- [ ] Create Web Service — Root Directory: `suits`
+- [ ] Set all environment variables
+- [ ] Manual deploy → confirm build logs succeed
+- [ ] `python manage.py createsuperuser` via Render Shell
+- [ ] Test: `https://suits-backend.onrender.com/admin/`
+
+**CI/CD**
+- [ ] Copy Render Deploy Hook URL
+- [ ] Add `RENDER_DEPLOY_HOOK` secret to GitHub
 - [ ] Create `.github/workflows/deploy.yml`
-- [ ] Push to main → confirm CI/CD runs
-- [ ] Update `CORS_ALLOWED_ORIGINS` when React app is deployed
+- [ ] Push → confirm Actions run green
+
+**React Integration**
+- [ ] Set `VITE_API_URL` in React project
+- [ ] Update `CORS_ALLOWED_ORIGINS` in Render env vars when React is deployed
