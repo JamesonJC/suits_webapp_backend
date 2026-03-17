@@ -22,6 +22,7 @@ router.register(r"tenants",  TenantViewSet,  basename="tenant")
 router.register(r"lawfirms", LawFirmViewSet, basename="lawfirm")
 
 urlpatterns = [
+    path('', api_root, name="api-root"),
     # ── Auth ──────────────────────────────────────────────────────────────────
     path("api/auth/login/",   TokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/auth/refresh/", TokenRefreshView.as_view(),    name="token_refresh"),
