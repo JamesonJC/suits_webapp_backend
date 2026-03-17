@@ -15,6 +15,7 @@ class TenantMiddleware:
     """
 
     PUBLIC_PATH_PREFIXES = [
+        "",
         "/",                     # root
         "/admin/",
         "/api/auth/",            # login + refresh
