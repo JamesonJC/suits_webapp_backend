@@ -23,7 +23,7 @@ def api_root(request):
       "documents": "/api/documents",
       "users": "/api/users",
       "cases": "/api/cases",
-      "workflows": "/api/workflows-templates",
+      "workflows": "/api/workflow-templates",
       "workflowSteps": "/api/steps",
       "workflowTransitions": "/api/transitions",
     }
