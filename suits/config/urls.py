@@ -7,8 +7,9 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from apps.tenants.views import TenantViewSet
 from apps.lawfirms.views import LawFirmViewSet
+from apps.core.views import api_root
 
-# ✅ FIX: The original registered WorkflowTemplateViewSet and WorkflowStepViewSet
+# FIX: The original registered WorkflowTemplateViewSet and WorkflowStepViewSet
 #         BOTH in this router AND inside apps/workflows/urls.py (via include).
 #         That produced duplicate conflicting URL patterns.
 #
