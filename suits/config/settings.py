@@ -1,34 +1,22 @@
 # config/settings.py
-#
-# ENVIRONMENT STRATEGY:
-# ─────────────────────
-# We use python-decouple to read config from:
-#   - A `.env` file when running locally
-#   - Environment variables when running on Render
-#
-# This means the SAME settings.py works in both places.
-# You never hardcode secrets — they always come from the environment.
 
 from pathlib import Path
 from datetime import timedelta
 import os
+from urllib.parse import urlparse, parse_qsl
+from dotenv import load_dotenv
 from decouple import config, Csv
+
+# Load .env file for local development
+# On Render, environment variables are injected directly — load_dotenv() is harmless there
+load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # ─── Security ────────────────────────────────────────────────────────────────
 
-# SECRET_KEY: Render injects this as an env var.
-# Locally it comes from your .env file.
-# NEVER hardcode a real secret key in this file.
 SECRET_KEY = config("SECRET_KEY", default="django-insecure-local-dev-only-change-in-production")
-
-# DEBUG: Always False on Render. True locally.
 DEBUG = config("DEBUG", default=False, cast=bool)
-
-# ALLOWED_HOSTS: The domains Django will accept requests from.
-# On Render this will be your .onrender.com domain.
-# Csv() lets you pass multiple hosts as a comma-separated string.
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1", cast=Csv())
 
 # ─── Apps ────────────────────────────────────────────────────────────────────
@@ -56,15 +44,12 @@ INSTALLED_APPS = [
 ]
 
 # ─── Middleware ───────────────────────────────────────────────────────────────
-# ORDER MATTERS — do not rearrange these.
-# WhiteNoise must be second (right after SecurityMiddleware).
-# CorsMiddleware must be before CommonMiddleware.
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
-    "whitenoise.middleware.WhiteNoiseMiddleware",      # serves static files in production
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
-    "corsheaders.middleware.CorsMiddleware",           # must be before CommonMiddleware
+    "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -96,9 +81,6 @@ SIMPLE_JWT = {
 }
 
 # ─── CORS ─────────────────────────────────────────────────────────────────────
-# Controls which frontend domains can call this API from a browser.
-# Your React app's deployed URL goes here.
-# Multiple origins: "https://app.com,https://www.app.com"
 
 CORS_ALLOWED_ORIGINS = config(
     "CORS_ALLOWED_ORIGINS",
@@ -106,7 +88,6 @@ CORS_ALLOWED_ORIGINS = config(
     cast=Csv()
 )
 
-# Allow the React frontend to send these headers with every request
 CORS_ALLOW_HEADERS = [
     "accept",
     "accept-encoding",
@@ -117,40 +98,49 @@ CORS_ALLOW_HEADERS = [
     "user-agent",
     "x-csrftoken",
     "x-requested-with",
-    "x-tenant-code",    # ← your custom multi-tenant header
+    "x-tenant-code",
 ]
 
 # ─── Database ─────────────────────────────────────────────────────────────────
-# DATABASE_URL is automatically set by Render when you attach a Postgres database.
-# Format: postgresql://user:password@host:port/dbname
+# Uses Neon's recommended urlparse approach.
+# DATABASE_URL is set in:
+#   - .env file locally (leave empty to use SQLite)
+#   - Render environment variables in production
 #
-# Locally: if DATABASE_URL is not set, falls back to SQLite.
-# This means zero config for local development.
+# Neon connection string format:
+#   postgresql://user:password@ep-xxxx.region.aws.neon.tech/dbname?sslmode=require
+#
+# urlparse breaks this into its parts so Django can connect correctly.
+# parse_qsl pulls out ?sslmode=require and passes it as an OPTIONS dict.
 
-DATABASE_URL = config("DATABASE_URL", default=None)
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 if DATABASE_URL:
-    # Production (Render): parse the connection string automatically
-    import dj_database_url
+    # Production: parse the Neon (or any Postgres) connection string
+    tmpPostgres = urlparse(DATABASE_URL)
     DATABASES = {
-        "default": dj_database_url.parse(
-            DATABASE_URL,
-            conn_max_age=600,        # keep connections alive for 10 minutes (performance)
-            ssl_require=True,        # Render Postgres requires SSL
-        )
+        "default": {
+            "ENGINE":   "django.db.backends.postgresql",
+            "NAME":     tmpPostgres.path.replace("/", ""),  # strips the leading slash
+            "USER":     tmpPostgres.username,
+            "PASSWORD": tmpPostgres.password,
+            "HOST":     tmpPostgres.hostname,
+            "PORT":     tmpPostgres.port or 5432,
+            # parse_qsl turns "sslmode=require" into {"sslmode": "require"}
+            # Django passes this directly to psycopg as connection options
+            "OPTIONS":  dict(parse_qsl(tmpPostgres.query)),
+        }
     }
 else:
-    # Local development: SQLite — no setup needed
+    # Local development: SQLite — zero config needed
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
-            "NAME": BASE_DIR / "db.sqlite3",
+            "NAME":   BASE_DIR / "db.sqlite3",
         }
     }
 
-# ─── Cloudflare R2 (File Storage) ────────────────────────────────────────────
-# These are read from env vars — never hardcoded.
-# Set them in Render dashboard → Environment → Environment Variables.
+# ─── Cloudflare R2 ────────────────────────────────────────────────────────────
 
 CLOUDFLARE_R2_KEY_ID     = config("CLOUDFLARE_R2_KEY_ID",     default="")
 CLOUDFLARE_R2_SECRET_KEY = config("CLOUDFLARE_R2_SECRET_KEY", default="")
@@ -158,15 +148,12 @@ CLOUDFLARE_R2_BUCKET     = config("CLOUDFLARE_R2_BUCKET",     default="")
 CLOUDFLARE_R2_ACCOUNT_ID = config("CLOUDFLARE_R2_ACCOUNT_ID", default="")
 
 # ─── Static Files ─────────────────────────────────────────────────────────────
-# WhiteNoise serves Django's static files (admin CSS etc.) directly.
-# No separate file server needed — Gunicorn handles it all.
-# CompressedManifestStaticFilesStorage adds cache-busting hashes to filenames.
 
 STATIC_URL  = "/static/"
 STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 STATICFILES_DIRS = (
-    [os.path.join(BASE_DIR, "static")] 
-    if os.path.exists(os.path.join(BASE_DIR, "static")) 
+    [os.path.join(BASE_DIR, "static")]
+    if os.path.exists(os.path.join(BASE_DIR, "static"))
     else []
 )
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
@@ -205,9 +192,8 @@ AUTH_PASSWORD_VALIDATORS = [
 
 # ─── Internationalisation ─────────────────────────────────────────────────────
 
-LANGUAGE_CODE = "en-us"
-TIME_ZONE     = "UTC"
-USE_I18N      = True
-USE_TZ        = True
-
+LANGUAGE_CODE      = "en-us"
+TIME_ZONE          = "UTC"
+USE_I18N           = True
+USE_TZ             = True
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
