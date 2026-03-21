@@ -7,7 +7,6 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from apps.tenants.views import TenantViewSet
 from apps.lawfirms.views import LawFirmViewSet
-from apps.core.views import api_root
 # Our view accepts email OR username and returns specific error messages
 from apps.users.views import LoginView
 
