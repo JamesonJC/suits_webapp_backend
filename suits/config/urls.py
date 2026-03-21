@@ -8,6 +8,8 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from apps.tenants.views import TenantViewSet
 from apps.lawfirms.views import LawFirmViewSet
 from apps.core.views import api_root
+# Our view accepts email OR username and returns specific error messages
+from apps.users.views import LoginView
 
 # FIX: The original registered WorkflowTemplateViewSet and WorkflowStepViewSet
 #         BOTH in this router AND inside apps/workflows/urls.py (via include).
@@ -23,16 +25,17 @@ router.register(r"tenants",  TenantViewSet,  basename="tenant")
 router.register(r"lawfirms", LawFirmViewSet, basename="lawfirm")
 
 urlpatterns = [
-    path('', api_root, name="api-root"),
     # ── Auth ──────────────────────────────────────────────────────────────────
-    path("api/auth/login/",   TokenObtainPairView.as_view(), name="token_obtain_pair"),
-    path("api/auth/refresh/", TokenRefreshView.as_view(),    name="token_refresh"),
-
+    # Custom login — accepts email or username, returns specific errors
+    path("api/auth/login/",   LoginView.as_view(),       name="token_obtain_pair"),
+    # Standard refresh — unchanged
+    path("api/auth/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
+ 
     # ── Admin ─────────────────────────────────────────────────────────────────
     path("admin/", admin.site.urls),
-
+ 
     # ── API routers ───────────────────────────────────────────────────────────
-    path("api/", include(router.urls)),              # /api/tenants/, /api/lawfirms/
-    path("api/", include("apps.workflows.urls")),    # /api/workflow-templates/, /api/steps/, /api/transitions/
-    path("api/", include("apps.lawfirms.urls")),     # /api/clients/, /api/cases/, /api/documents/
+    path("api/", include(router.urls)),
+    path("api/", include("apps.workflows.urls")),
+    path("api/", include("apps.lawfirms.urls")),
 ]
