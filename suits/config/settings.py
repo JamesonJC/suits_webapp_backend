@@ -85,6 +85,7 @@ SIMPLE_JWT = {
 CORS_ALLOWED_ORIGINS = config(
     "CORS_ALLOWED_ORIGINS",
     default="http://localhost:3000,http://localhost:5173",
+    "https://animated-enigma-w9w7qq4599jh9qvw-3000.app.github.dev",
     cast=Csv()
 )
 
