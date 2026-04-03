@@ -49,7 +49,7 @@ MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
-    "corsheaders.middleware.CorsMiddleware",
+    "corsheaders.middleware.CorsMiddleware",  # must be before CommonMiddleware
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -82,13 +82,17 @@ SIMPLE_JWT = {
 
 # ─── CORS ─────────────────────────────────────────────────────────────────────
 
+# Allow your frontend (Codespaces) + local dev
 CORS_ALLOWED_ORIGINS = config(
     "CORS_ALLOWED_ORIGINS",
-    default="http://localhost:3000,http://localhost:5173",
-    "https://animated-enigma-w9w7qq4599jh9qvw-3000.app.github.dev",
+    default="http://localhost:3000,http://localhost:5173,https://animated-enigma-w9w7qq4599jh9qvw-3000.app.github.dev",
     cast=Csv()
 )
 
+# Allow cookies / auth headers if needed
+CORS_ALLOW_CREDENTIALS = True
+
+# Explicit headers (safe + includes JWT)
 CORS_ALLOW_HEADERS = [
     "accept",
     "accept-encoding",
@@ -102,38 +106,27 @@ CORS_ALLOW_HEADERS = [
     "x-tenant-code",
 ]
 
+# OPTIONAL: during debugging only (uncomment if still stuck)
+# CORS_ALLOW_ALL_ORIGINS = True
+
 # ─── Database ─────────────────────────────────────────────────────────────────
-# Uses Neon's recommended urlparse approach.
-# DATABASE_URL is set in:
-#   - .env file locally (leave empty to use SQLite)
-#   - Render environment variables in production
-#
-# Neon connection string format:
-#   postgresql://user:password@ep-xxxx.region.aws.neon.tech/dbname?sslmode=require
-#
-# urlparse breaks this into its parts so Django can connect correctly.
-# parse_qsl pulls out ?sslmode=require and passes it as an OPTIONS dict.
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if DATABASE_URL:
-    # Production: parse the Neon (or any Postgres) connection string
     tmpPostgres = urlparse(DATABASE_URL)
     DATABASES = {
         "default": {
             "ENGINE":   "django.db.backends.postgresql",
-            "NAME":     tmpPostgres.path.replace("/", ""),  # strips the leading slash
+            "NAME":     tmpPostgres.path.replace("/", ""),
             "USER":     tmpPostgres.username,
             "PASSWORD": tmpPostgres.password,
             "HOST":     tmpPostgres.hostname,
             "PORT":     tmpPostgres.port or 5432,
-            # parse_qsl turns "sslmode=require" into {"sslmode": "require"}
-            # Django passes this directly to psycopg as connection options
             "OPTIONS":  dict(parse_qsl(tmpPostgres.query)),
         }
     }
 else:
-    # Local development: SQLite — zero config needed
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
