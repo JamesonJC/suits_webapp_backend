@@ -32,24 +32,12 @@ class TenantMiddleware:
         return any(path.startswith(p) for p in self.PUBLIC_PATH_PREFIXES)
 
     def __call__(self, request):
-        tenant_id = request.headers.get("X-Tenant-ID")
-
-        # Enforce tenant presence
-        # tenant enforcement enabled
-        if not tenant_id:
-            return JsonResponse(
-                {"error": "Tenant ID required"},
-                status=400
-            )
-
-        # Attach tenant to request
-        request.tenant_id = tenant_id
-
-        response = self.get_response(request)
-        return response
-
+        tenant_code = request.headers.get("X-Tenant-Code")
+        
         # tenant enforcement disabled
         # For Admin vewing purpose
+        # COMMENTED OUT — DO NOT DELETE (for future flexibility)
+        # ============================================================
         '''
         request.tenant = None
         set_current_tenant(None)
@@ -68,25 +56,25 @@ class TenantMiddleware:
         '''
 
         # ─────────────────────────────────────────────
-        # TEMP DISABLE (commented out enforcement)
+        # NOW ACTIVE
         # ─────────────────────────────────────────────
         #
-        # if not tenant_code:
-        #     return JsonResponse(
-        #         {"error": "Tenant header (X-Tenant-Code) is required"},
-        #         status=400
-        #     )
+        if not tenant_code:
+             return JsonResponse(
+                 {"error": "Tenant header (X-Tenant-Code) is required"},
+                 status=400
+             )
+        
+         try:
+             tenant = Tenant.objects.get(code=tenant_code, active=True)
+         except Tenant.DoesNotExist:
+             return JsonResponse(
+                 {"error": "Invalid or inactive tenant"},
+                 status=400
+             )
         #
-        # try:
-        #     tenant = Tenant.objects.get(code=tenant_code, active=True)
-        # except Tenant.DoesNotExist:
-        #     return JsonResponse(
-        #         {"error": "Invalid or inactive tenant"},
-        #         status=400
-        #     )
-        #
-        # request.tenant = tenant
-        # set_current_tenant(tenant)
+         request.tenant = tenant
+         set_current_tenant(tenant)
         #
         # ─────────────────────────────────────────────
 
