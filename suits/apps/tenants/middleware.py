@@ -32,6 +32,25 @@ class TenantMiddleware:
         return any(path.startswith(p) for p in self.PUBLIC_PATH_PREFIXES)
 
     def __call__(self, request):
+        tenant_id = request.headers.get("X-Tenant-ID")
+
+        # Enforce tenant presence
+        # tenant enforcement enabled
+        if not tenant_id:
+            return JsonResponse(
+                {"error": "Tenant ID required"},
+                status=400
+            )
+
+        # Attach tenant to request
+        request.tenant_id = tenant_id
+
+        response = self.get_response(request)
+        return response
+
+        # tenant enforcement disabled
+        # For Admin vewing purpose
+        '''
         request.tenant = None
         set_current_tenant(None)
 
@@ -45,10 +64,11 @@ class TenantMiddleware:
         tenant_code = (
             request.headers.get("X-Tenant-Code")
             or request.META.get("HTTP_X_TENANT_CODE")
-        )
+        ) 
+        '''
 
         # ─────────────────────────────────────────────
-        # 🚨 TEMP DISABLE (commented out enforcement)
+        # TEMP DISABLE (commented out enforcement)
         # ─────────────────────────────────────────────
         #
         # if not tenant_code:
@@ -70,7 +90,7 @@ class TenantMiddleware:
         #
         # ─────────────────────────────────────────────
 
-        # ✅ Instead: only set tenant IF provided (non-blocking)
+        # Instead: only set tenant IF provided (non-blocking)
         if tenant_code:
             try:
                 tenant = Tenant.objects.get(code=tenant_code, active=True)
