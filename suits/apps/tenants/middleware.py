@@ -21,7 +21,7 @@ from .context import set_current_tenant
 
 class TenantMiddleware:
 
-    # ✅ Public routes that DO NOT require tenant
+    # Public routes that DO NOT require tenant
     PUBLIC_PATH_PREFIXES = [
         "/",                     # root
         "/admin/",
