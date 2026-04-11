@@ -21,14 +21,23 @@ class BaseModel(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    # ✅ objects: tenant-scoped — used in all API views
+    # objects: tenant-scoped — used in all API views
     objects = TenantManager()
 
-    # ✅ unscoped: no filter — used in admin and engine internals
+    # unscoped: no filter — used in admin and engine internals
     unscoped = UnscopedManager()
 
     class Meta:
         abstract = True
+
+    def clean(self):
+        """
+        Enforce tenant presence at validation level.
+        """
+        if not self.tenant_id:
+            raise ValidationError(
+                f"{self.__class__.__name__} must have a tenant."
+            )
 
     def save(self, *args, **kwargs):
         # Auto-assign tenant from thread-local context if not set on new objects
