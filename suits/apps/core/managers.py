@@ -14,12 +14,15 @@ class TenantManager(models.Manager):
     """
 
     def get_queryset(self):
-        tenant = get_current_tenant()
         qs = super().get_queryset()
-        if tenant:
-            return qs.filter(tenant=tenant)
-        # No tenant context → return nothing (safe default)
-        return qs.none()
+        tenant = get_current_tenant()
+
+        if tenant is None:
+            # Safe default: no tenant context → no data
+            return qs.none()
+
+        # Enforce tenant isolation
+        return qs.filter(tenant_id=tenant.id)
 
 
 class UnscopedManager(models.Manager):
