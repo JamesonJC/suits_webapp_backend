@@ -30,7 +30,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'django_filters',
     'rest_framework',
-    'corsheaders',
+    'corsheaders',  # handles Cross-Origin Resource Sharing
     'apps.core',
     'apps.tenants',
     'apps.lawfirms',
@@ -46,16 +46,20 @@ INSTALLED_APPS = [
 # ─── Middleware ───────────────────────────────────────────────────────────────
 
 MIDDLEWARE = [
-    
-    "corsheaders.middleware.CorsMiddleware",  # must be before CommonMiddleware
+    # CorsMiddleware MUST be before CommonMiddleware
+    "corsheaders.middleware.CorsMiddleware",
+
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
+
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+
     "apps.tenants.middleware.TenantMiddleware",
     "apps.audit.middleware.AuditMiddleware",
+
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -83,17 +87,20 @@ SIMPLE_JWT = {
 
 # ─── CORS ─────────────────────────────────────────────────────────────────────
 
-# Allow your frontend (Codespaces) + local dev
+# Allows React (localhost:3000) to talk to Django (localhost:8000)
+# Uses environment variable FIRST (for production flexibility)
+# Falls back to safe dev defaults
+
 CORS_ALLOWED_ORIGINS = config(
     "CORS_ALLOWED_ORIGINS",
-    default="http://localhost:3000,http://localhost:5173,https://animated-enigma-w9w7qq4599jh9qvw-3000.app.github.dev",
+    default="http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,https://animated-enigma-w9w7qq4599jh9qvw-3000.app.github.dev",
     cast=Csv()
 )
 
-# Allow cookies / auth headers if needed
+# Allow cookies / Authorization headers (needed for JWT + session auth)
 CORS_ALLOW_CREDENTIALS = True
 
-# Explicit headers (safe + includes JWT)
+# Explicit headers (VERY IMPORTANT for your system)
 CORS_ALLOW_HEADERS = [
     "accept",
     "accept-encoding",
@@ -104,10 +111,10 @@ CORS_ALLOW_HEADERS = [
     "user-agent",
     "x-csrftoken",
     "x-requested-with",
-    "x-tenant-code",
+    "x-tenant-code",  # REQUIRED for your multi-tenant middleware
 ]
 
-# OPTIONAL: during debugging only (uncomment if still stuck)
+# 🚨 DEBUG OPTION ONLY (DO NOT ENABLE IN PROD)
 # CORS_ALLOW_ALL_ORIGINS = True
 
 # ─── Database ─────────────────────────────────────────────────────────────────
@@ -115,6 +122,7 @@ CORS_ALLOW_HEADERS = [
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if DATABASE_URL:
+    # Production (Render / Postgres)
     tmpPostgres = urlparse(DATABASE_URL)
     DATABASES = {
         "default": {
@@ -128,6 +136,7 @@ if DATABASE_URL:
         }
     }
 else:
+    # Local development
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
@@ -146,11 +155,13 @@ CLOUDFLARE_R2_ACCOUNT_ID = config("CLOUDFLARE_R2_ACCOUNT_ID", default="")
 
 STATIC_URL  = "/static/"
 STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
+
 STATICFILES_DIRS = (
     [os.path.join(BASE_DIR, "static")]
     if os.path.exists(os.path.join(BASE_DIR, "static"))
     else []
 )
+
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 # ─── URLs / Templates / WSGI ─────────────────────────────────────────────────
