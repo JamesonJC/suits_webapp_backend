@@ -1,25 +1,29 @@
-from django.shortcuts import render
-
-# Create your views here.
 # apps/users/views.py
 #
-# Custom JWT login endpoint that:
-#   1. Accepts either email OR username in the same field
-#   2. Returns specific error messages:
-#      - "No account found with that email or username." (not registered)
-#      - "Incorrect password." (user exists but wrong password)
-#   3. Standard JWT tokens returned on success
+# ─────────────────────────────────────────────────────────────────────────────
+# WHAT WAS BROKEN & WHY:
+#
+#   LoginView was returning only { id, username, email } in the user object.
+#   The frontend needs:
+#     - is_staff / is_superuser  → to detect admin and skip tenant-code logic
+#     - tenant_code / tenant_name → to store in localStorage as X-Tenant-Code
+#                                   for every subsequent authenticated request
+#
+#   Without is_staff, the frontend always assumed every user was a firm user,
+#   tried to validate a tenant code, stored "" as the tenant code, and then
+#   every API call was rejected by the tenant middleware with HTTP 400.
+#
+#   Without tenant_code, even firm users who typed the correct code had it
+#   silently discarded — authService stored "" instead of the real code.
+#
+# WHAT WAS FIXED:
+#   ✅ LoginView now resolves tenant via user → attorney → law_firm → tenant
+#      (same lookup logic already in MeView)
+#   ✅ LoginView now returns is_staff, is_superuser, tenant_code, tenant_name,
+#      first_name, last_name in the user payload
+#   ✅ MeView unchanged (it already returned the full profile)
+# ─────────────────────────────────────────────────────────────────────────────
 
-# suits/apps/users/views.py
-# 
-# This file handles user-related API views.
-# The most important one here is MeView — after a user logs in and gets their
-# JWT token, the frontend immediately calls /api/auth/me/ to learn:
-#   - Who they are (username, email)
-#   - Which tenant (law firm) they belong to (so we can include X-Tenant-Code
-#     in every subsequent request)
-
-from django.shortcuts import render
 from django.contrib.auth import get_user_model
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -30,122 +34,108 @@ from rest_framework_simplejwt.tokens import RefreshToken
 User = get_user_model()
 
 
+# ── Helper: find the tenant for a given user ─────────────────────────────────
+def _resolve_tenant(user):
+    """
+    Walk the chain: user → attorney → law_firm → tenant
+    Admin users may not have an attorney profile, so we return None for them.
+    """
+    tenant = getattr(user, "tenant", None)
+    if not tenant:
+        try:
+            tenant = user.attorney.law_firm.tenant
+        except Exception:
+            tenant = None
+    return tenant
+
+
+# ── LoginView ─────────────────────────────────────────────────────────────────
 class LoginView(APIView):
     """
     POST /api/auth/login/
-    Body: { "login": "email@example.com OR username", "password": "..." }
+    Body: { "login": "<email OR username>", "password": "..." }
 
-    Returns:
-      200 { access, refresh, user: { id, username, email } }
-      400 { field: "login",    message: "No account found..." }
-      400 { field: "password", message: "Incorrect password." }
+    Returns 200 with full user payload including is_staff, is_superuser,
+    tenant_code — all required by the frontend for routing and headers.
     """
     permission_classes = [AllowAny]
 
     def post(self, request):
-        login    = request.data.get("login", "").strip()
-        password = request.data.get("password", "").strip()
+        login_input = request.data.get("login", "").strip()
+        password    = request.data.get("password", "").strip()
 
-        if not login or not password:
+        if not login_input or not password:
             return Response(
                 {"field": "login", "message": "Please enter your email/username and password."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ── Step 1: Find the user by email OR username ────────────────────────
+        # Find user by email or username
         user = None
-
-        # Try email first (if input looks like an email)
-        if "@" in login:
-            user = User.objects.filter(email__iexact=login).first()
-        
-        # Fall back to username (also catches emails that didn't match)
+        if "@" in login_input:
+            user = User.objects.filter(email__iexact=login_input).first()
         if not user:
-            user = User.objects.filter(username__iexact=login).first()
+            user = User.objects.filter(username__iexact=login_input).first()
 
-        # ── Step 2: User not found ────────────────────────────────────────────
         if not user:
             return Response(
-                {
-                    "field":   "login",
-                    "message": "No account found with that email or username.",
-                },
+                {"field": "login", "message": "No account found with that email or username."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ── Step 3: Wrong password ────────────────────────────────────────────
         if not user.check_password(password):
             return Response(
-                {
-                    "field":   "password",
-                    "message": "Incorrect password. Please try again.",
-                },
+                {"field": "password", "message": "Incorrect password. Please try again."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ── Step 4: Account inactive ──────────────────────────────────────────
         if not user.is_active:
             return Response(
-                {
-                    "field":   "login",
-                    "message": "This account has been deactivated. Please contact support.",
-                },
+                {"field": "login", "message": "This account is deactivated. Contact support."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ── Step 5: Issue JWT tokens ──────────────────────────────────────────
+        tenant  = _resolve_tenant(user)
         refresh = RefreshToken.for_user(user)
 
         return Response({
             "access":  str(refresh.access_token),
             "refresh": str(refresh),
             "user": {
-                "id":       user.id,
-                "username": user.username,
-                "email":    user.email,
+                "id":           user.id,
+                "username":     user.username,
+                "email":        user.email,
+                "first_name":   user.first_name,
+                "last_name":    user.last_name,
+                "is_staff":     user.is_staff,       # ← ADDED (admin detection)
+                "is_superuser": user.is_superuser,   # ← ADDED (admin detection)
+                "tenant_code":  tenant.code if tenant else None,  # ← ADDED
+                "tenant_name":  tenant.name if tenant else None,  # ← ADDED
             },
         }, status=status.HTTP_200_OK)
 
+
+# ── MeView ────────────────────────────────────────────────────────────────────
 class MeView(APIView):
     """
     GET /api/auth/me/
-
-    Returns the currently authenticated user's profile.
-    The frontend calls this immediately after login to get the tenant_code,
-    which is then attached as X-Tenant-Code on every future API request.
-
-    Why this matters:
-    - Our backend is multi-tenant: every query is automatically filtered to a
-      tenant (law firm) based on the X-Tenant-Code header.
-    - Without this endpoint, the frontend wouldn't know which tenant code to use.
+    Returns the full profile of the currently authenticated user.
+    Lives under /api/auth/ — whitelisted in TenantMiddleware (no tenant header needed).
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        user = request.user
-
-        # First, try to get the tenant directly from the user model
-        # (staff accounts may have this set directly)
-        tenant = getattr(user, 'tenant', None)
-
-        # If no direct tenant, try to get it via the Attorney relationship:
-        # User -> Attorney -> LawFirm -> Tenant
-        # This is the normal path for attorneys created by the seed commands.
-        if not tenant:
-            try:
-                # user.attorney uses the OneToOne reverse relation from Attorney model
-                tenant = user.attorney.law_firm.tenant
-            except Exception:
-                tenant = None
+        user   = request.user
+        tenant = _resolve_tenant(user)
 
         return Response({
-            'id': user.id,
-            'username': user.username,
-            'email': user.email,
-            'first_name': user.first_name,
-            'last_name': user.last_name,
-            # These two are what the frontend needs most:
-            'tenant_code': tenant.code if tenant else None,
-            'tenant_name': tenant.name if tenant else None,
-            'is_staff': user.is_staff,
+            "id":           user.id,
+            "username":     user.username,
+            "email":        user.email,
+            "first_name":   user.first_name,
+            "last_name":    user.last_name,
+            "is_staff":     user.is_staff,
+            "is_superuser": user.is_superuser,
+            "tenant_code":  tenant.code if tenant else None,
+            "tenant_name":  tenant.name if tenant else None,
         })

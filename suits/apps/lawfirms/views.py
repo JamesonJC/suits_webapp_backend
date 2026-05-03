@@ -1,34 +1,44 @@
 # apps/lawfirms/views.py
 #
-# HOW THE WORKFLOW API WORKS:
+# ─────────────────────────────────────────────────────────────────────────────
+# WORKFLOW API OVERVIEW:
 #
-# 1. Create a case (workflow_template can be set on creation):
-#    POST /api/cases/
-#    Body: {"code": "PI-001", "title": "...", "client": 3, "workflow_template": 2}
-#    → Case created, auto-placed on step 1 of the workflow.
+#   1. Create a case (workflow_template optional on creation):
+#      POST /api/cases/
+#      Body: {"code":"PI-001","title":"...","client":3,"workflow_template":2}
+#      → Case created, auto-placed on step 1 of the workflow.
 #
-# 2. See where the case is and what moves are available:
-#    GET /api/cases/{id}/workflow_status/
-#    Response:
-#      {
-#        "workflow": "Personal Injury",
-#        "current_step": "Initial Consultation",
-#        "steps": [...all steps with is_current flag...],
-#        "available_transitions": [
-#          {"id": 3, "label": "Proceed to Document Collection", "to_step_name": "..."},
-#          {"id": 4, "label": "Close Case - No Merit",          "to_step_name": "Closed"},
-#        ]
-#      }
+#   2. See the current step and available next moves:
+#      GET /api/cases/{id}/workflow_status/
+#      → Returns workflow name, current step, all steps, available transitions.
 #
-# 3. Attorney picks one and advances:
-#    POST /api/cases/{id}/advance_step/
-#    Body: {"transition_id": 3}
-#    → Case moves to "Document Collection". No context dicts. No auto-rules.
-#    → Attorney chose. System applied.
+#   3. Attorney picks a transition and advances:
+#      POST /api/cases/{id}/advance_step/
+#      Body: {"transition_id": 3}
+#      → Case moves to the chosen step. Status updates.
 #
-# 4. Attach or change workflow:
-#    POST /api/cases/{id}/attach_workflow/
-#    Body: {"workflow_template_id": 5}
+#   4. Attach or change workflow template:
+#      POST /api/cases/{id}/attach_workflow/
+#      Body: {"workflow_template_id": 5}
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# WHAT WAS FIXED:
+#
+#   All ViewSets now check for admin users (is_staff / is_superuser) FIRST and
+#   return ALL records using Model.unscoped (the UnscopedManager that bypasses
+#   tenant filtering).
+#
+#   Previously, if an admin had no attorney profile and no tenant on the
+#   request, every get_queryset() returned Model.objects.none() — empty data.
+#
+#   ✅ LawFirmViewSet:  admin → LawFirm.unscoped.all()
+#   ✅ AttorneyViewSet: admin → Attorney.unscoped.all()
+#   ✅ ClientViewSet:   admin → Client.unscoped.all()
+#   ✅ CaseViewSet:     admin → Case.unscoped.all()
+#   ✅ DocumentViewSet: admin → Document.unscoped.all()
+#
+#   The attorney-path and tenant-fallback paths are unchanged for firm users.
+# ─────────────────────────────────────────────────────────────────────────────
 
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -47,83 +57,117 @@ from .serializers import (
 )
 
 
+# ── Helper ────────────────────────────────────────────────────────────────────
+def _is_admin(user) -> bool:
+    """Returns True if the user is a Django staff member or superuser."""
+    return bool(user and (user.is_staff or user.is_superuser))
+
+
+# ── LawFirmViewSet ────────────────────────────────────────────────────────────
 class LawFirmViewSet(viewsets.ModelViewSet):
     serializer_class   = LawFirmSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        user = self.request.user
+
+        # Admin sees all law firms across all tenants
+        if _is_admin(user):
+            return LawFirm.unscoped.all()
+
+        # Firm users: filter to their own tenant
         tenant = getattr(self.request, "tenant", None)
         if tenant:
             return LawFirm.objects.filter(tenant=tenant)
+
         return LawFirm.objects.none()
 
     def perform_create(self, serializer):
         serializer.save(tenant=self.request.tenant)
 
 
+# ── AttorneyViewSet ───────────────────────────────────────────────────────────
 class AttorneyViewSet(viewsets.ModelViewSet):
     serializer_class   = AttorneySerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        if hasattr(self.request.user, "attorney"):
-            return Attorney.objects.filter(law_firm=self.request.user.attorney.law_firm)
+        user = self.request.user
+
+        # Admin sees all attorneys
+        if _is_admin(user):
+            return Attorney.unscoped.all()
+
+        # Firm users: only attorneys in the same law firm
+        if hasattr(user, "attorney"):
+            return Attorney.objects.filter(law_firm=user.attorney.law_firm)
+
         return Attorney.objects.none()
 
     def perform_create(self, serializer):
         serializer.save(law_firm=self.request.user.attorney.law_firm)
 
 
+# ── ClientViewSet ─────────────────────────────────────────────────────────────
 class ClientViewSet(viewsets.ModelViewSet):
     serializer_class   = ClientSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        if hasattr(self.request.user, "attorney"):
-            return Client.objects.filter(law_firm=self.request.user.attorney.law_firm)
+        user = self.request.user
+
+        # Admin sees all clients
+        if _is_admin(user):
+            return Client.unscoped.all()
+
+        # Firm users: only clients in their law firm
+        if hasattr(user, "attorney"):
+            return Client.objects.filter(law_firm=user.attorney.law_firm)
+
         return Client.objects.none()
 
     def perform_create(self, serializer):
         serializer.save(law_firm=self.request.user.attorney.law_firm)
 
 
+# ── CaseViewSet ───────────────────────────────────────────────────────────────
 class CaseViewSet(viewsets.ModelViewSet):
     serializer_class   = CaseSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         """
-        FIXED ALIGNMENT:
-        - Previously only worked if user had attorney relation
-        - Now supports:
-            1. Attorney users
-            2. Tenant-based fallback (important for admin/staff/system users)
-        - Prevents silent Case.objects.none() → which caused frontend empty state
+        Data access hierarchy:
+          1. Admin (is_staff or is_superuser)  → all cases, unscoped
+          2. Attorney (has user.attorney)       → cases in their law firm
+          3. Tenant fallback                    → cases in the request tenant's firm
+          4. Safe default                       → empty queryset
         """
-
         user = self.request.user
 
         if not user or not user.is_authenticated:
             return Case.objects.none()
 
-        # 1. Primary path: Attorney-based access
+        # 1. Admin: sees every case across all tenants
+        if _is_admin(user):
+            return Case.unscoped.all()
+
+        # 2. Attorney: see cases belonging to their law firm
         attorney = getattr(user, "attorney", None)
         if attorney and attorney.law_firm:
             return Case.objects.filter(law_firm=attorney.law_firm)
 
-        # 2. Fallback: Tenant-based access (multi-tenant system safety)
+        # 3. Tenant fallback (e.g. non-attorney staff within a tenant)
         tenant = getattr(self.request, "tenant", None)
         if tenant and hasattr(tenant, "law_firm"):
             return Case.objects.filter(law_firm=tenant.law_firm)
 
-        # 3. Safe default
         return Case.objects.none()
 
     def perform_create(self, serializer):
         serializer.save(law_firm=self.request.user.attorney.law_firm)
 
-    # ── Attach or change workflow ─────────────────────────────────────────────
-
+    # ── Custom action: attach a workflow template ─────────────────────────────
     @action(detail=True, methods=["post"], url_path="attach_workflow")
     def attach_workflow(self, request, pk=None):
         case        = self.get_object()
@@ -151,8 +195,7 @@ class CaseViewSet(viewsets.ModelViewSet):
             "status":       updated.status,
         })
 
-    # ── Advance to next step ──────────────────────────────────────────────────
-
+    # ── Custom action: advance to the next workflow step ─────────────────────
     @action(detail=True, methods=["post"], url_path="advance_step")
     def advance_step(self, request, pk=None):
         case          = self.get_object()
@@ -166,8 +209,7 @@ class CaseViewSet(viewsets.ModelViewSet):
 
         try:
             updated = CaseWorkflowService.advance_step(
-                case,
-                transition_id=int(transition_id)
+                case, transition_id=int(transition_id)
             )
         except ValueError as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -179,16 +221,15 @@ class CaseViewSet(viewsets.ModelViewSet):
             "available_transitions": CaseWorkflowService.get_available_transitions(updated),
         })
 
-    # ── Workflow status ───────────────────────────────────────────────────────
-
+    # ── Custom action: get full workflow status ───────────────────────────────
     @action(detail=True, methods=["get"], url_path="workflow_status")
     def workflow_status(self, request, pk=None):
         case = self.get_object()
 
         if not case.workflow_template_id:
             return Response({
-                "workflow":  None,
-                "message":   "No workflow attached to this case yet.",
+                "workflow": None,
+                "message":  "No workflow attached to this case yet.",
             })
 
         return Response({
@@ -200,13 +241,22 @@ class CaseViewSet(viewsets.ModelViewSet):
         })
 
 
+# ── DocumentViewSet ───────────────────────────────────────────────────────────
 class DocumentViewSet(viewsets.ModelViewSet):
     serializer_class   = DocumentSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        if hasattr(self.request.user, "attorney"):
-            return Document.objects.filter(case__law_firm=self.request.user.attorney.law_firm)
+        user = self.request.user
+
+        # Admin sees all documents
+        if _is_admin(user):
+            return Document.unscoped.all()
+
+        # Firm users: only documents attached to cases in their law firm
+        if hasattr(user, "attorney"):
+            return Document.objects.filter(case__law_firm=user.attorney.law_firm)
+
         return Document.objects.none()
 
     def perform_create(self, serializer):

@@ -1,4 +1,9 @@
 # apps/lawfirms/serializers.py
+#
+# WHAT CHANGED:
+#   ✅ CaseSerializer now includes `client_name` (read-only, derived from
+#      client.first_name + last_name). This lets the frontend show the
+#      client's name in list views without a separate /clients/ request.
 
 from rest_framework import serializers
 from .models import LawFirm, Attorney, Client, Case, Document
@@ -33,8 +38,7 @@ class ClientSerializer(serializers.ModelSerializer):
 
 
 class CaseSerializer(serializers.ModelSerializer):
-    # Read-only extras so the client always knows where the case is
-    # without needing a separate /workflow_status/ call for basic display
+    # Human-readable step and workflow names (read-only extras)
     current_step_name = serializers.CharField(
         source="current_step.name",
         read_only=True,
@@ -45,6 +49,15 @@ class CaseSerializer(serializers.ModelSerializer):
         read_only=True,
         default=None,
     )
+    # ✅ NEW: client's full name — derived from the related Client object.
+    # Allows the dashboard and case list to show names without a second request.
+    client_name = serializers.SerializerMethodField(read_only=True)
+
+    def get_client_name(self, obj):
+        """Return "FirstName LastName" or just one of them if the other is blank."""
+        if obj.client:
+            return f"{obj.client.first_name} {obj.client.last_name}".strip()
+        return None
 
     class Meta:
         model  = Case
@@ -52,17 +65,24 @@ class CaseSerializer(serializers.ModelSerializer):
             "id",
             "code",
             "title",
-            "status",               # always mirrors current_step.name
-            "current_step",         # FK id (writable to reassign manually)
-            "current_step_name",    # human-readable step name (read-only)
-            "workflow_template",    # FK id
-            "workflow_name",        # human-readable template name (read-only)
+            "status",
+            "current_step",
+            "current_step_name",
+            "workflow_template",
+            "workflow_name",
             "law_firm",
             "client",
+            "client_name",        # ← ADDED: the full client name string
             "start_date",
             "end_date",
         ]
-        read_only_fields = ("law_firm", "status", "current_step", "current_step_name")
+        read_only_fields = (
+            "law_firm",
+            "status",
+            "current_step",
+            "current_step_name",
+            "client_name",
+        )
 
     def validate_code(self, value):
         if not value:
