@@ -41,7 +41,7 @@ from .context import set_current_tenant
 
 class TenantMiddleware:
 
-    # ✅ FIX: "/" removed — it matched every path, bypassing all tenant checks.
+    #  FIX: "/" removed — it matched every path, bypassing all tenant checks.
     # These are path PREFIXES. "/" would prefix-match /api/cases/, /api/clients/,
     # everything — so it made every request public. Now only genuinely public
     # prefixes are listed here.
