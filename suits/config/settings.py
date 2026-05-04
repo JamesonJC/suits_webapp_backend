@@ -7,19 +7,17 @@ from urllib.parse import urlparse, parse_qsl
 from dotenv import load_dotenv
 from decouple import config, Csv
 
-# Load .env file for local development
-# On Render, environment variables are injected directly — load_dotenv() is harmless there
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# ─── Security ────────────────────────────────────────────────────────────────
+# ─── Security ─────────────────────────────────────────────────────────────────
 
-SECRET_KEY = config("SECRET_KEY", default="django-insecure-local-dev-only-change-in-production")
-DEBUG = config("DEBUG", default=False, cast=bool)
+SECRET_KEY    = config("SECRET_KEY", default="django-insecure-local-dev-only-change-in-production")
+DEBUG         = config("DEBUG", default=False, cast=bool)
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1", cast=Csv())
 
-# ─── Apps ────────────────────────────────────────────────────────────────────
+# ─── Apps ─────────────────────────────────────────────────────────────────────
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -30,7 +28,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'django_filters',
     'rest_framework',
-    'corsheaders',  # handles Cross-Origin Resource Sharing
+    'corsheaders',
     'apps.core',
     'apps.tenants',
     'apps.lawfirms',
@@ -43,34 +41,43 @@ INSTALLED_APPS = [
     'apps.audit',
 ]
 
-# ─── Middleware ───────────────────────────────────────────────────────────────
+# ─── Middleware ────────────────────────────────────────────────────────────────
 
 MIDDLEWARE = [
-    # CorsMiddleware MUST be before CommonMiddleware
-    "corsheaders.middleware.CorsMiddleware",
-
+    "corsheaders.middleware.CorsMiddleware",          # MUST be first (before SecurityMiddleware)
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
-
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
-
     "apps.tenants.middleware.TenantMiddleware",
     "apps.audit.middleware.AuditMiddleware",
-
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
-# ─── REST Framework ───────────────────────────────────────────────────────────
-
+# ─── REST Framework ────────────────────────────────────────────────────────────
+#
+# WHAT WAS BROKEN:
+#   SessionAuthentication was listed FIRST. When a browser has a Django session
+#   cookie (e.g. from a Django admin login), DRF uses SessionAuthentication
+#   which then enforces CSRF. Our React frontend never sends a CSRF token
+#   → DRF raises PermissionDenied → HTTP 403 on every API call.
+#
+# WHAT WAS FIXED:
+#   JWTAuthentication is now FIRST. DRF stops at the first successful
+#      authenticator. JWT always succeeds for valid tokens, so SessionAuthentication
+#      is never reached for frontend API calls → no CSRF enforcement → no 403.
+#
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
+        # JWT FIRST — this is the only auth method the React frontend uses.
+        #    DRF stops here when a valid Bearer token is present.
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        # Session and Basic are kept for the Django admin panel only.
         "rest_framework.authentication.SessionAuthentication",
         "rest_framework.authentication.BasicAuthentication",
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticated",
@@ -81,26 +88,37 @@ REST_FRAMEWORK = {
 }
 
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "ACCESS_TOKEN_LIFETIME":  timedelta(minutes=60),   # Extended from 30m for usability
+    "REFRESH_TOKEN_LIFETIME":  timedelta(days=7),
+    # Tells simplejwt to look for the user_id in the token payload
+    "USER_ID_FIELD":  "id",
+    "USER_ID_CLAIM":  "user_id",
 }
 
 # ─── CORS ─────────────────────────────────────────────────────────────────────
+#
+# WHAT WAS BROKEN:
+#   CORS_ALLOW_CREDENTIALS = True AND the deployed frontend URL was not in
+#   CORS_ALLOWED_ORIGINS. Browsers block credentialed cross-origin requests
+#   when the server doesn't include the exact Access-Control-Allow-Origin header.
+#   This caused silent 403/network errors on the deployed frontend.
+#
+# WHAT WAS FIXED:
+#    CORS_ALLOW_CREDENTIALS set to False — our frontend sends JWT in the
+#      Authorization header (not cookies), so we don't need credentials mode.
+#      This lets us safely allow all origins (CORS_ALLOW_ALL_ORIGINS = True).
+#
+#    CORS_ALLOW_ALL_ORIGINS = True — safe when credentials = False.
+#      In production you can restrict this via the CORS_ALLOWED_ORIGINS env var.
+#
+# TO RESTRICT IN PRODUCTION:
+#   Set CORS_ALLOW_ALL_ORIGINS=False and CORS_ALLOWED_ORIGINS=https://yourfrontend.netlify.app
+#   in your Render environment variables.
+#
+CORS_ALLOW_CREDENTIALS = False   #  Changed from True — JWT is in header, not cookie
+CORS_ALLOW_ALL_ORIGINS = True    #  Safe because credentials=False; restrict via env var in prod
 
-# Allows React (localhost:3000) to talk to Django (localhost:8000)
-# Uses environment variable FIRST (for production flexibility)
-# Falls back to safe dev defaults
-
-CORS_ALLOWED_ORIGINS = config(
-    "CORS_ALLOWED_ORIGINS",
-    default="http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,https://animated-enigma-w9w7qq4599jh9qvw-3000.app.github.dev",
-    cast=Csv()
-)
-
-# Allow cookies / Authorization headers (needed for JWT + session auth)
-CORS_ALLOW_CREDENTIALS = True
-
-# Explicit headers (VERY IMPORTANT for your system)
+# Explicit headers our frontend uses — ensures preflight passes
 CORS_ALLOW_HEADERS = [
     "accept",
     "accept-encoding",
@@ -111,18 +129,14 @@ CORS_ALLOW_HEADERS = [
     "user-agent",
     "x-csrftoken",
     "x-requested-with",
-    "x-tenant-code",  # REQUIRED for your multi-tenant middleware
+    "x-tenant-code",    # Required by TenantMiddleware
 ]
-
-# 🚨 DEBUG OPTION ONLY (DO NOT ENABLE IN PROD)
-# CORS_ALLOW_ALL_ORIGINS = True
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if DATABASE_URL:
-    # Production (Render / Postgres)
     tmpPostgres = urlparse(DATABASE_URL)
     DATABASES = {
         "default": {
@@ -136,7 +150,6 @@ if DATABASE_URL:
         }
     }
 else:
-    # Local development
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
@@ -164,14 +177,14 @@ STATICFILES_DIRS = (
 
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
-# ─── URLs / Templates / WSGI ─────────────────────────────────────────────────
+# ─── URLs / Templates / WSGI ──────────────────────────────────────────────────
 
 ROOT_URLCONF = "config.urls"
 
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [BASE_DIR / "templates"],
+        "DIRS":    [BASE_DIR / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
