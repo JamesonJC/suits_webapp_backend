@@ -29,6 +29,7 @@
 
 from rest_framework import serializers
 from .models import LawFirm, Attorney, Client, Case, Document
+from apps.workflows.models import WorkflowTemplate  # ✅ FIX: direct import
 
 
 class LawFirmSerializer(serializers.ModelSerializer):
@@ -98,16 +99,10 @@ class CaseSerializer(serializers.ModelSerializer):
 
     # workflow_template is optional: can be attached later via /attach_workflow/
     workflow_template = serializers.PrimaryKeyRelatedField(
-        queryset=None,   # Set dynamically in __init__ to avoid import issues
+        queryset=WorkflowTemplate.objects.all(),  # ✅ FIX: must provide queryset
         required=False,
         allow_null=True,
     )
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Lazy import to avoid circular dependency
-        from apps.workflows.models import WorkflowTemplate
-        self.fields["workflow_template"].queryset = WorkflowTemplate.objects.all()
 
     class Meta:
         model  = Case
