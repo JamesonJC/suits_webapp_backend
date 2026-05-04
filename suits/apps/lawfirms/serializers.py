@@ -99,7 +99,7 @@ class CaseSerializer(serializers.ModelSerializer):
 
     # workflow_template is optional: can be attached later via /attach_workflow/
     workflow_template = serializers.PrimaryKeyRelatedField(
-        queryset=WorkflowTemplate.objects.all(),  # ✅ FIX: must provide queryset
+        queryset=WorkflowTemplate.objects.all(),  #  FIX: must provide queryset
         required=False,
         allow_null=True,
     )
