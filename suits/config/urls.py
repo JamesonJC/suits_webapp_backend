@@ -63,7 +63,7 @@ router.register(r"lawfirms", LawFirmViewSet, basename="lawfirm")
 urlpatterns = [
 
     # ── Auth ────────────────────────────────────────────────────────────────
-    # ✅ CHANGED: LoginView (our custom view) replaces TokenObtainPairView.
+    #  CHANGED: LoginView (our custom view) replaces TokenObtainPairView.
     #   - Accepts: POST { login: "email_or_username", password: "..." }
     #   - Returns: { access, refresh, user: { id, email, is_staff, tenant_code, ... } }
     path("api/auth/login/",   LoginView.as_view(),      name="login"),
