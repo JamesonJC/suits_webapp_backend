@@ -4,23 +4,33 @@ apps/tenants/middleware.py — Tenant Middleware
 ─────────────────────────────────────────────────────────────────────────────
 WHAT WAS BROKEN:
 
-  Admin users (is_staff / is_superuser) do not belong to any tenant, so they
-  never send an X-Tenant-Code header. The old middleware returned HTTP 400 for
-  any non-public request without that header — locking admins out entirely.
+  1. PUBLIC_PATH_PREFIXES contained "/".
+     Because ALL paths start with "/", EVERY request was treated as public.
+     The middleware always called set_current_tenant(None), which made the
+     TenantManager return qs.none() for every firm-user query → empty data.
+
+  2. Admin users (is_staff/is_superuser) have no tenant, so they never send
+     X-Tenant-Code. The middleware would return 400 for them (if the "/" bug
+     were fixed). The admin bypass via JWT peeking was correct in concept
+     but would never run because "/" caught everything first.
 
 WHAT WAS FIXED:
 
-  ✅ Added _is_superuser_request() — decodes the JWT from the Authorization
-     header and checks if the user is staff/superuser.
-     (This is a read-only peek — no side effects, no full DRF auth cycle.)
+   Removed "/" from PUBLIC_PATH_PREFIXES. "/" (root) is handled via an
+     exact-match check instead. This means all /api/ paths are now properly
+     subject to tenant validation.
 
-  ✅ If the request has no tenant code but IS from an admin:
-       request.tenant = None
-       set_current_tenant(None)
-       → allowed through. ViewSets handle admin access via Model.unscoped.
+   PUBLIC_PATH_PREFIXES now only lists prefixes that truly need no tenant:
+       /admin/     → Django admin panel (uses session auth, not tenant)
+       /api/auth/  → Login, refresh, me — no tenant needed at auth time
+       /static/    → Static assets
 
-  ✅ Non-admin requests without a tenant code still get HTTP 400 (unchanged).
-  ✅ Public paths (/, /admin/, /api/auth/, /static/) unchanged.
+   Admin bypass (_is_superuser_request) now actually runs for /api/ paths
+     that lack an X-Tenant-Code header, correctly passing admins through with
+     tenant=None while blocking non-admin requests without a code (400).
+
+   Firm users who send a valid X-Tenant-Code get tenant set correctly,
+     so TenantManager filters properly.
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -31,33 +41,46 @@ from .context import set_current_tenant
 
 class TenantMiddleware:
 
-    # Paths that never need a tenant header (login, Django admin, static files)
-    PUBLIC_PATH_PREFIXES = [
-        "/",
-        "/admin/",
-        "/api/auth/",
-        "/static/",
-    ]
+    # ✅ FIX: "/" removed — it matched every path, bypassing all tenant checks.
+    # These are path PREFIXES. "/" would prefix-match /api/cases/, /api/clients/,
+    # everything — so it made every request public. Now only genuinely public
+    # prefixes are listed here.
+    PUBLIC_PATH_PREFIXES = (
+        "/admin/",    # Django admin — uses session auth, no tenant header needed
+        "/api/auth/", # Login, refresh, me — tenant resolved post-login
+        "/static/",   # Static files
+        "/favicon",   # Browser favicon requests
+    )
+
+    # Exact paths that bypass tenant logic (root only)
+    PUBLIC_EXACT_PATHS = ("/",)
 
     def __init__(self, get_response):
         self.get_response = get_response
 
     def is_public_path(self, path: str) -> bool:
-        return any(path.startswith(p) for p in self.PUBLIC_PATH_PREFIXES)
+        """
+        Returns True if this path should skip tenant validation.
+        Uses EXACT match for "/" so we don't accidentally whitelist all paths.
+        Uses PREFIX match for /admin/, /api/auth/, etc.
+        """
+        if path in self.PUBLIC_EXACT_PATHS:
+            return True
+        return any(path.startswith(prefix) for prefix in self.PUBLIC_PATH_PREFIXES)
 
     def _is_superuser_request(self, request) -> bool:
         """
         Peek at the JWT in the Authorization header to check if the caller is
-        a Django staff user or superuser.
+        a Django admin (is_staff or is_superuser).
 
-        WHY we do this in middleware (before DRF auth runs):
-          The TenantMiddleware sits BEFORE DRF authentication in the middleware
-          stack. We need to decide whether to enforce tenant presence BEFORE
-          the request reaches any view. Decoding the JWT here is the only way
-          to make that decision.
+        WHY we do this in middleware:
+          TenantMiddleware runs BEFORE DRF's authentication layer. We need to
+          decide whether to require a tenant code before the request reaches
+          any view. Decoding the JWT here is the only way to identify admins
+          at this stage without running the full DRF auth cycle.
 
-        This is read-only — we don't set request.user here (DRF does that
-        later). We're only checking the token payload.
+        This is read-only — we only inspect the token, we don't set request.user.
+        DRF sets request.user later inside the view dispatch.
         """
         try:
             from rest_framework_simplejwt.authentication import JWTAuthentication
@@ -72,46 +95,50 @@ class TenantMiddleware:
 
     def __call__(self, request):
 
-        # ── Step 1: Public routes skip all tenant logic ───────────────────────
+        # ── Step 1: Public routes bypass all tenant logic ─────────────────────
         if self.is_public_path(request.path):
             request.tenant = None
             set_current_tenant(None)
             return self.get_response(request)
 
-        # ── Step 2: Try to read the tenant code from the request header ───────
+        # ── Step 2: Read the tenant code from the request header ──────────────
+        # The frontend api.js interceptor adds this header automatically
+        # from localStorage after login.
         tenant_code = (
             request.headers.get("X-Tenant-Code")
-            or request.META.get("HTTP_X_TENANT_CODE")
-        )
+            or request.META.get("HTTP_X_TENANT_CODE", "")
+        ).strip()
 
-        # ── Step 3: No tenant code — only admins are allowed through ──────────
+        # ── Step 3: No tenant code present ───────────────────────────────────
         if not tenant_code:
+            # Admin users (is_staff / is_superuser) have no tenant.
+            # They are allowed through — their ViewSets use Model.unscoped.all()
+            # to see all data across all tenants.
             if self._is_superuser_request(request):
-                # Admin users see all data via Model.unscoped in their ViewSets.
-                # No tenant context is set — TenantManager returns none(),
-                # but ViewSets detect is_staff and switch to unscoped queries.
                 request.tenant = None
                 set_current_tenant(None)
                 return self.get_response(request)
 
-            # Regular users must always provide a tenant code
+            # Non-admin request with no tenant code → reject with a clear error.
+            # The frontend should never reach this state after a proper login.
             return JsonResponse(
-                {"error": "Tenant header (X-Tenant-Code) is required"},
+                {"error": "X-Tenant-Code header is required for this endpoint."},
                 status=400,
             )
 
-        # ── Step 4: Validate the tenant code ─────────────────────────────────
+        # ── Step 4: Validate the tenant code against the database ─────────────
         try:
             tenant = Tenant.objects.get(code=tenant_code, active=True)
         except Tenant.DoesNotExist:
             return JsonResponse(
-                {"error": "Invalid or inactive tenant"},
+                {"error": f"Tenant code '{tenant_code}' is invalid or the firm is inactive."},
                 status=400,
             )
 
-        # ── Step 5: Bind tenant to request + thread-local context ─────────────
-        # The thread-local is read by TenantManager.get_queryset() on every
-        # database query to enforce row-level tenant isolation automatically.
+        # ── Step 5: Bind tenant to request and thread-local context ───────────
+        # request.tenant is used by ViewSets directly.
+        # set_current_tenant() is used by TenantManager in every DB query
+        # to automatically filter results to this tenant's data.
         request.tenant = tenant
         set_current_tenant(tenant)
 
