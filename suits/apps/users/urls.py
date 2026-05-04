@@ -2,7 +2,7 @@
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # WHAT CHANGED:
-#   ✅ Added LoginView registration as a backup path /api/auth/login/ here,
+#    Added LoginView registration as a backup path /api/auth/login/ here,
 #      though the primary registration is in config/urls.py.
 #      The main entry here is /api/auth/me/ (unchanged).
 #
