@@ -29,7 +29,7 @@
 
 from rest_framework import serializers
 from .models import LawFirm, Attorney, Client, Case, Document
-from apps.workflows.models import WorkflowTemplate  # ✅ FIX: direct import
+from apps.workflows.models import WorkflowTemplate  #  FIX: direct import
 
 
 class LawFirmSerializer(serializers.ModelSerializer):
