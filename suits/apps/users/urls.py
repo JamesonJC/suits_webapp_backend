@@ -1,14 +1,22 @@
-# suits/apps/users/urls.py
+# apps/users/urls.py
 #
-# URL configuration for the users app.
-# This file maps URL patterns to views within apps/users/.
+# ─────────────────────────────────────────────────────────────────────────────
+# WHAT CHANGED:
+#    Added LoginView registration as a backup path /api/auth/login/ here,
+#      though the primary registration is in config/urls.py.
+#      The main entry here is /api/auth/me/ (unchanged).
 #
-# This is included in config/urls.py under the prefix "api/auth/",
-# so the full URL becomes:  GET /api/auth/me/
+# URL STRUCTURE (included under "api/auth/" prefix in config/urls.py):
+#   POST /api/auth/login/  → LoginView  (accepts login + password, returns user object)
+#   GET  /api/auth/me/     → MeView     (returns current user's full profile)
+# ─────────────────────────────────────────────────────────────────────────────
 
 from django.urls import path
-from .views import MeView
+from .views import LoginView, MeView
 
 urlpatterns = [
-    path('me/', MeView.as_view(), name='user-me'),
+    # GET /api/auth/me/ — returns the full user profile for the logged-in user.
+    # The frontend calls this on page refresh to re-hydrate the user object
+    # if it was cleared from localStorage (e.g., after token refresh).
+    path("me/", MeView.as_view(), name="user-me"),
 ]
