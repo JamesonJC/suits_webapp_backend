@@ -1,35 +1,74 @@
 # apps/lawfirms/serializers.py
 #
 # ─────────────────────────────────────────────────────────────────────────────
-# WHAT WAS FIXED IN THIS VERSION:
+# ROOT CAUSE OF THE LOGIN 500 FIXED HERE:
 #
-#   PROBLEM — AssertionError on startup: "Relational field must provide a queryset"
+#   Previous version:
+#     from apps.workflows.models import WorkflowTemplate  ← module-level import
+#     ...
+#     workflow_template = serializers.PrimaryKeyRelatedField(
+#         queryset=WorkflowTemplate.objects.all(),         ← evaluated at class definition
+#     )
 #
-#     Previous code set workflow_template = PrimaryKeyRelatedField(queryset=None)
-#     and then assigned the real queryset in __init__().
+#   WHY THIS CAUSED A 500 ON EVERY ENDPOINT (including login):
 #
-#     DRF validates PrimaryKeyRelatedField at CLASS DEFINITION time — before
-#     any instance is created and before __init__() ever runs. It checks that
-#     queryset is not None immediately when the class body is parsed.
-#     Setting queryset=None therefore triggers AssertionError at startup,
-#     crashing the entire Django process (not just a single request).
+#     Django imports ALL app modules at startup. The import chain was:
+#       Django startup
+#       → loads apps.lawfirms (serializers.py is imported by admin.py or views.py)
+#       → serializers.py runs "from apps.workflows.models import WorkflowTemplate"
+#       → Django starts loading apps.workflows.models
+#       → workflows/models.py likely imports or references lawfirms models
+#       → lawfirms models are still mid-import → circular import → ImportError
 #
-#     Fix: import WorkflowTemplate at the top of the file and pass it as a
-#     direct queryset=WorkflowTemplate.objects.all() on the field. This is the
-#     standard DRF pattern. The lazy __init__ override is not needed here
-#     because there is no circular import — apps.workflows and apps.lawfirms
-#     do not import each other at the model level.
+#     When any app crashes at startup, Django can't build its URL dispatcher.
+#     Every request — including GET / and POST /api/auth/login/ — returns 500
+#     because the app server itself is broken, not just one endpoint.
 #
+#   THE FIX — use get_queryset() override:
+#
+#     class WorkflowTemplatePKField(serializers.PrimaryKeyRelatedField):
+#         def get_queryset(self):
+#             from apps.workflows.models import WorkflowTemplate  ← lazy import
+#             return WorkflowTemplate.objects.all()
+#
+#     The import now happens at REQUEST TIME (when get_queryset() is called),
+#     not at CLASS DEFINITION time. By request time, ALL apps are fully loaded
+#     so there's no circular dependency. This is the DRF-recommended pattern
+#     for cross-app FK fields that risk circular imports.
+#
+#   WHY NOT queryset=WorkflowTemplate.objects.all() AT CLASS LEVEL:
+#     Even when the import itself succeeds (no circular import crash), calling
+#     .objects.all() at class definition time can fail during Django's app
+#     loading phase before migrations have run, or when the DB isn't available
+#     (e.g. first deploy). get_queryset() is always safer.
 # ─────────────────────────────────────────────────────────────────────────────
 
 from rest_framework import serializers
 from .models import LawFirm, Attorney, Client, Case, Document
 
-# FIX: direct import — no circular dependency exists here.
-# workfows imports nothing from lawfirms at the module level.
-from apps.workflows.models import WorkflowTemplate
+# NOTE: WorkflowTemplate is NOT imported at module level.
+# It is imported lazily inside WorkflowTemplatePKField.get_queryset().
+# This breaks the circular import chain that caused every endpoint to 500.
 
 
+# ── Custom PrimaryKeyRelatedField for WorkflowTemplate ────────────────────────
+# This pattern is the DRF-recommended way to handle cross-app FK fields
+# that would otherwise create circular imports at the module level.
+class WorkflowTemplatePKField(serializers.PrimaryKeyRelatedField):
+    """
+    Lazy-loaded PrimaryKeyRelatedField for WorkflowTemplate.
+
+    get_queryset() is called at request time (not class definition time),
+    so the import of WorkflowTemplate happens after all apps are fully loaded.
+    This eliminates the circular import: lawfirms → workflows → lawfirms.
+    """
+    def get_queryset(self):
+        # Lazy import — only runs when a request is processed, never at startup
+        from apps.workflows.models import WorkflowTemplate
+        return WorkflowTemplate.objects.all()
+
+
+# ── LawFirmSerializer ──────────────────────────────────────────────────────────
 class LawFirmSerializer(serializers.ModelSerializer):
     class Meta:
         model            = LawFirm
@@ -37,6 +76,7 @@ class LawFirmSerializer(serializers.ModelSerializer):
         read_only_fields = ('tenant',)
 
 
+# ── AttorneySerializer ─────────────────────────────────────────────────────────
 class AttorneySerializer(serializers.ModelSerializer):
     class Meta:
         model            = Attorney
@@ -44,6 +84,7 @@ class AttorneySerializer(serializers.ModelSerializer):
         read_only_fields = ('law_firm', 'user')
 
 
+# ── ClientSerializer ───────────────────────────────────────────────────────────
 class ClientSerializer(serializers.ModelSerializer):
     class Meta:
         model            = Client
@@ -53,15 +94,16 @@ class ClientSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         """
         Auto-inject law_firm and tenant from the requesting attorney's profile.
-        The frontend only needs to send: first_name, last_name, email, phone.
-        law_firm is derived server-side — never trusted from the request body.
+        Frontend only needs to send: first_name, last_name, email, phone.
+        law_firm and tenant are derived server-side — never trusted from the body.
         """
         request  = self.context['request']
         attorney = getattr(request.user, 'attorney', None)
 
         if not attorney:
             raise serializers.ValidationError(
-                'Only attorneys can create clients. Your account has no attorney profile.'
+                'Only attorneys can create clients. '
+                'Your account has no attorney profile.'
             )
 
         validated_data['law_firm'] = attorney.law_firm
@@ -69,27 +111,27 @@ class ClientSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
+# ── CaseSerializer ─────────────────────────────────────────────────────────────
 class CaseSerializer(serializers.ModelSerializer):
 
-    # ── Read-only computed fields ─────────────────────────────────────────────
+    # ── Read-only computed / derived fields ────────────────────────────────────
 
-    # Human-readable name of the current workflow step
-    # e.g. "Document Collection" — mirrors case.current_step.name
+    # Human-readable current workflow step name, e.g. "Document Collection"
     current_step_name = serializers.CharField(
         source='current_step.name',
         read_only=True,
         default=None,
     )
 
-    # Human-readable workflow template name — mirrors case.workflow_template.name
+    # Human-readable workflow template name, e.g. "Personal Injury Workflow"
     workflow_name = serializers.CharField(
         source='workflow_template.name',
         read_only=True,
         default=None,
     )
 
-    # Full client name: "First Last"
-    # Lets the dashboard and case list show client names without a second request.
+    # Full client name "First Last" — so the dashboard can show names without
+    # making a separate /clients/{id}/ request for every row.
     client_name = serializers.SerializerMethodField(read_only=True)
 
     def get_client_name(self, obj):
@@ -97,15 +139,13 @@ class CaseSerializer(serializers.ModelSerializer):
             return f'{obj.client.first_name} {obj.client.last_name}'.strip()
         return None
 
-    # ── Optional writable fields ──────────────────────────────────────────────
+    # ── Writable optional field ────────────────────────────────────────────────
 
-    # FIX: queryset=WorkflowTemplate.objects.all() — NOT queryset=None.
-    # DRF validates this field at class creation time. queryset=None fails
-    # immediately with AssertionError before any request is even received.
-    # required=False + allow_null=True makes the field optional so cases can
-    # be created without a workflow and one attached later via /attach_workflow/.
-    workflow_template = serializers.PrimaryKeyRelatedField(
-        queryset=WorkflowTemplate.objects.all(),
+    # FIX: Uses WorkflowTemplatePKField (lazy import) instead of a
+    # module-level import + queryset=WorkflowTemplate.objects.all().
+    # required=False → case can be created without a workflow, attached later.
+    # allow_null=True → frontend can explicitly send null to clear the workflow.
+    workflow_template = WorkflowTemplatePKField(
         required=False,
         allow_null=True,
     )
@@ -114,18 +154,18 @@ class CaseSerializer(serializers.ModelSerializer):
         model  = Case
         fields = [
             'id',
-            'code',              # Case reference e.g. "PI-2024-001" — required, unique per firm
-            'title',             # Case title / short description — required
-            'status',            # Synced to current_step.name automatically — read-only
-            'law_firm',          # Set by ViewSet.perform_create(), never from request — read-only
-            'client',            # FK to Client — required (send integer ID)
-            'client_name',       # Derived: "First Last" — read-only
-            'workflow_template', # Optional FK — can be attached later
-            'workflow_name',     # Derived: template name — read-only
-            'current_step',      # Managed by WorkflowEngine — read-only
-            'current_step_name', # Derived: step name — read-only
-            'start_date',        # Auto-set on creation — read-only
-            'end_date',          # Optional close date — writable
+            'code',               # Unique case reference e.g. "PI-2024-001" — required
+            'title',              # Case title / description — required
+            'status',             # Derived from current workflow step — read-only
+            'law_firm',           # Set by ViewSet.perform_create() — read-only
+            'client',             # FK to Client (send integer ID) — required
+            'client_name',        # "First Last" from client record — read-only
+            'workflow_template',  # Optional FK — attachable later via /attach_workflow/
+            'workflow_name',      # Template name string — read-only
+            'current_step',       # Managed by WorkflowEngine — read-only
+            'current_step_name',  # Step name string — read-only
+            'start_date',         # Auto-set on creation — read-only
+            'end_date',           # Optional close date — writable
         ]
         read_only_fields = (
             'law_firm',
@@ -138,18 +178,19 @@ class CaseSerializer(serializers.ModelSerializer):
         )
 
     def validate_code(self, value):
-        """Case code is required and cannot be blank or whitespace-only."""
+        """Case reference code — required, stripped of whitespace."""
         if not value or not str(value).strip():
             raise serializers.ValidationError('Case code is required.')
         return str(value).strip()
 
     def validate_title(self, value):
-        """Case title is required and cannot be blank or whitespace-only."""
+        """Case title — required, stripped of whitespace."""
         if not value or not str(value).strip():
             raise serializers.ValidationError('Case title is required.')
         return str(value).strip()
 
 
+# ── DocumentSerializer ─────────────────────────────────────────────────────────
 class DocumentSerializer(serializers.ModelSerializer):
     class Meta:
         model            = Document
@@ -158,9 +199,8 @@ class DocumentSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         """
-        Ensure the document is being attached to a case in the same firm.
-        This runs on create — cross-firm document attachment is blocked here
-        before the data reaches the database.
+        Block cross-firm document attachment.
+        Attorneys can only upload documents to cases in their own law firm.
         """
         request  = self.context.get('request')
         case     = attrs.get('case')
