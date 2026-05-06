@@ -43,136 +43,169 @@
 #     (e.g. first deploy). get_queryset() is always safer.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# New (WHAT CHANGED):
-#      CaseSerializer now includes `document_count` — a read-only integer
-#      computed from the reverse FK relation: case.documents.count()
-#      The Document model has related_name="documents" on its Case FK,
-#      so obj.documents.count() is a single DB query.
-#      This lets the Cases card UI show "12 Documents" without a separate request.
-#
-#      WorkflowTemplatePKField uses lazy get_queryset() to avoid the circular
-#      import that caused the entire app to return 500 at startup.
-#      (lawfirms/serializers.py → workflows/models.py → back to lawfirms)
- 
 from rest_framework import serializers
 from .models import LawFirm, Attorney, Client, Case, Document
- 
- 
+
+# NOTE: WorkflowTemplate is NOT imported at module level.
+# It is imported lazily inside WorkflowTemplatePKField.get_queryset().
+# This breaks the circular import chain that caused every endpoint to 500.
+
+
+# ── Custom PrimaryKeyRelatedField for WorkflowTemplate ────────────────────────
+# This pattern is the DRF-recommended way to handle cross-app FK fields
+# that would otherwise create circular imports at the module level.
 class WorkflowTemplatePKField(serializers.PrimaryKeyRelatedField):
     """
-    Lazy-loaded FK field for WorkflowTemplate.
-    The import happens inside get_queryset() (called at request time),
-    NOT at class definition time, so the circular import is avoided.
+    Lazy-loaded PrimaryKeyRelatedField for WorkflowTemplate.
+
+    get_queryset() is called at request time (not class definition time),
+    so the import of WorkflowTemplate happens after all apps are fully loaded.
+    This eliminates the circular import: lawfirms → workflows → lawfirms.
     """
     def get_queryset(self):
+        # Lazy import — only runs when a request is processed, never at startup
         from apps.workflows.models import WorkflowTemplate
         return WorkflowTemplate.objects.all()
- 
- 
+
+
+# ── LawFirmSerializer ──────────────────────────────────────────────────────────
 class LawFirmSerializer(serializers.ModelSerializer):
     class Meta:
         model            = LawFirm
         fields           = '__all__'
         read_only_fields = ('tenant',)
- 
- 
+
+
+# ── AttorneySerializer ─────────────────────────────────────────────────────────
 class AttorneySerializer(serializers.ModelSerializer):
     class Meta:
         model            = Attorney
         fields           = '__all__'
         read_only_fields = ('law_firm', 'user')
- 
- 
+
+
+# ── ClientSerializer ───────────────────────────────────────────────────────────
 class ClientSerializer(serializers.ModelSerializer):
     class Meta:
         model            = Client
         fields           = ['id', 'first_name', 'last_name', 'email', 'phone', 'law_firm']
         read_only_fields = ('law_firm', 'tenant')
- 
+
     def create(self, validated_data):
+        """
+        Auto-inject law_firm and tenant from the requesting attorney's profile.
+        Frontend only needs to send: first_name, last_name, email, phone.
+        law_firm and tenant are derived server-side — never trusted from the body.
+        """
         request  = self.context['request']
         attorney = getattr(request.user, 'attorney', None)
+
         if not attorney:
             raise serializers.ValidationError(
-                'Only attorneys can create clients. Your account has no attorney profile.'
+                'Only attorneys can create clients. '
+                'Your account has no attorney profile.'
             )
+
         validated_data['law_firm'] = attorney.law_firm
         validated_data['tenant']   = attorney.law_firm.tenant
         return super().create(validated_data)
- 
- 
+
+
+# ── CaseSerializer ─────────────────────────────────────────────────────────────
 class CaseSerializer(serializers.ModelSerializer):
- 
-    # Human-readable current workflow step name e.g. "Document Collection"
+
+    # ── Read-only computed / derived fields ────────────────────────────────────
+
+    # Human-readable current workflow step name, e.g. "Document Collection"
     current_step_name = serializers.CharField(
-        source='current_step.name', read_only=True, default=None,
+        source='current_step.name',
+        read_only=True,
+        default=None,
     )
- 
-    # Human-readable workflow template name e.g. "Personal Injury Workflow"
+
+    # Human-readable workflow template name, e.g. "Personal Injury Workflow"
     workflow_name = serializers.CharField(
-        source='workflow_template.name', read_only=True, default=None,
+        source='workflow_template.name',
+        read_only=True,
+        default=None,
     )
- 
-    # Full client name "First Last" — shown in the Cases card
+
+    # Full client name "First Last" — so the dashboard can show names without
+    # making a separate /clients/{id}/ request for every row.
     client_name = serializers.SerializerMethodField(read_only=True)
- 
-    # NEW: document count — shown as "12 Documents" on each card
-    # Uses the reverse relation: Document.case FK with related_name="documents"
-    # obj.documents is a RelatedManager; .count() is a single cheap SQL COUNT(*)
-    document_count = serializers.SerializerMethodField(read_only=True)
- 
-    workflow_template = WorkflowTemplatePKField(required=False, allow_null=True)
- 
+
     def get_client_name(self, obj):
         if obj.client:
             return f'{obj.client.first_name} {obj.client.last_name}'.strip()
         return None
- 
-    def get_document_count(self, obj):
-        try:
-            return obj.documents.count()
-        except Exception:
-            return 0
- 
+
+    # ── Writable optional field ────────────────────────────────────────────────
+
+    # FIX: Uses WorkflowTemplatePKField (lazy import) instead of a
+    # module-level import + queryset=WorkflowTemplate.objects.all().
+    # required=False → case can be created without a workflow, attached later.
+    # allow_null=True → frontend can explicitly send null to clear the workflow.
+    workflow_template = WorkflowTemplatePKField(
+        required=False,
+        allow_null=True,
+    )
+
     class Meta:
         model  = Case
         fields = [
-            'id', 'code', 'title', 'status',
-            'law_firm',
-            'client', 'client_name',
-            'workflow_template', 'workflow_name',
-            'current_step', 'current_step_name',
-            'start_date', 'end_date',
-            'document_count',     # ← NEW
+            'id',
+            'code',               # Unique case reference e.g. "PI-2024-001" — required
+            'title',              # Case title / description — required
+            'status',             # Derived from current workflow step — read-only
+            'law_firm',           # Set by ViewSet.perform_create() — read-only
+            'client',             # FK to Client (send integer ID) — required
+            'client_name',        # "First Last" from client record — read-only
+            'workflow_template',  # Optional FK — attachable later via /attach_workflow/
+            'workflow_name',      # Template name string — read-only
+            'current_step',       # Managed by WorkflowEngine — read-only
+            'current_step_name',  # Step name string — read-only
+            'start_date',         # Auto-set on creation — read-only
+            'end_date',           # Optional close date — writable
         ]
         read_only_fields = (
-            'law_firm', 'status',
-            'current_step', 'current_step_name',
-            'client_name', 'workflow_name',
-            'start_date', 'document_count',
+            'law_firm',
+            'status',
+            'current_step',
+            'current_step_name',
+            'client_name',
+            'workflow_name',
+            'start_date',
         )
- 
+
     def validate_code(self, value):
+        """Case reference code — required, stripped of whitespace."""
         if not value or not str(value).strip():
             raise serializers.ValidationError('Case code is required.')
         return str(value).strip()
- 
+
     def validate_title(self, value):
+        """Case title — required, stripped of whitespace."""
         if not value or not str(value).strip():
             raise serializers.ValidationError('Case title is required.')
         return str(value).strip()
- 
- 
+
+
+# ── DocumentSerializer ─────────────────────────────────────────────────────────
 class DocumentSerializer(serializers.ModelSerializer):
     class Meta:
         model            = Document
         fields           = '__all__'
         read_only_fields = ('uploaded_at',)
- 
+
     def validate(self, attrs):
+        """
+        Block cross-firm document attachment.
+        Attorneys can only upload documents to cases in their own law firm.
+        """
         request  = self.context.get('request')
         case     = attrs.get('case')
         attorney = getattr(request.user, 'attorney', None) if request else None
+
         if attorney and case and case.law_firm != attorney.law_firm:
             raise serializers.ValidationError(
                 'Cannot attach a document to a case outside your firm.'
