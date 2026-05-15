@@ -165,12 +165,12 @@ class CaseViewSet(viewsets.ModelViewSet):
 
         # 1. Admin — sees all cases across all tenants
         if _is_admin(user):
-            return Case.unscoped.all()
+            return Case.unscoped.prefetch_related("documents").all()
 
         # 2. Attorney — sees cases in their law firm
         attorney = getattr(user, 'attorney', None)
         if attorney and attorney.law_firm:
-            return Case.objects.filter(law_firm=attorney.law_firm)
+            return Case.objects.filter(law_firm=attorney.law_firm).prefetch_related("documents")
 
         # 3. Non-attorney firm staff — derive law_firm from the request tenant
         #    Tenant has a OneToOne to LawFirm via LawFirm.tenant FK.
@@ -178,7 +178,7 @@ class CaseViewSet(viewsets.ModelViewSet):
         tenant = getattr(self.request, 'tenant', None)
         if tenant:
             try:
-                return Case.objects.filter(law_firm=tenant.law_firm)
+                return Case.objects.filter(law_firm=tenant.law_firm).prefetch_related("documents")
             except Exception:
                 pass
 
