@@ -1,4 +1,52 @@
-fly.toml
-.git/
+# ─────────────────────────────────────────────────────────────────────────────
+# .dockerignore — files/dirs excluded from the Docker build context
+#
+# WHY THIS MATTERS:
+#   Docker sends the entire build context to the daemon for every build.
+#   Without .dockerignore, node_modules, .git, __pycache__ etc. are included,
+#   making builds slow and images unnecessarily large.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Git history — not needed in the image
+.git
+.gitignore
+
+# Environment files — NEVER bake secrets into the image
+.env
+.env.*
+!.env.example
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyc
+.Python
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# Test and coverage artefacts
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Editor / OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Collected static (generated at build time inside the container)
+staticfiles/
+
+# Local DB (SQLite used in development only)
 *.sqlite3
-venv
+db.sqlite3
+
+# Docker compose files (not needed inside the container)
+docker/

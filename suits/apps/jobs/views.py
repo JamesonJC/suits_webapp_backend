@@ -1,45 +1,50 @@
-from django.shortcuts import render
-
-# Create your views here.
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
-from rest_framework.response import Response
-from .models import Job, Attachment
-from apps.core.r2_client import upload_file
-from apps.tenants.context import get_current_tenant
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from .models import Task
+from .serializers import TaskSerializer
 
-from apps.core.r2_client import upload_file, generate_r2_key
-from apps.rbac.permissions import HasPlatformPermission
+def _is_admin(user):
+    return bool(user and (user.is_staff or user.is_superuser))
 
-class JobViewSet(viewsets.ModelViewSet):
-    queryset = Job.objects.all()
-    permission_classes = [IsAuthenticated, HasPlatformPermission]
-    # ...serializer_class, permissions...
+class TaskViewSet(viewsets.ModelViewSet):
+    serializer_class   = TaskSerializer
+    permission_classes = [IsAuthenticated]
 
-    @action(detail=True, methods=["post"])
-    def upload_attachment(self, request, pk=None):
-        job = self.get_object()
-        file_obj = request.FILES["file"]
-        tenant = get_current_tenant()
-        key = f"tenant_{tenant.id}/job_{job.id}/{file_obj.name}"
+    def get_queryset(self):
+        user = self.request.user
+        if not user or not user.is_authenticated:
+            return Task.objects.none()
+        if _is_admin(user):
+            return Task.unscoped.all()
+        attorney = getattr(user, 'attorney', None)
+        if attorney and attorney.law_firm:
+            return Task.objects.filter(law_firm=attorney.law_firm)
+        tenant = getattr(self.request, 'tenant', None)
+        if tenant:
+            try:
+                return Task.objects.filter(law_firm=tenant.law_firm)
+            except Exception:
+                pass
+        return Task.objects.none()
 
-        upload_file(file_obj, key)
+    def perform_create(self, serializer):
+        user     = self.request.user
+        attorney = getattr(user, 'attorney', None)
+        if attorney and attorney.law_firm:
+            serializer.save(law_firm=attorney.law_firm, tenant=attorney.law_firm.tenant)
+        else:
+            serializer.save()
 
-        attachment = Attachment.objects.create(
-            job=job,
-            filename=file_obj.name,
-            key=key,
-            content_type=file_obj.content_type,
-            size=file_obj.size
-        )
-        return Response({"id": attachment.id, "key": attachment.key})
-
-    @action(detail=True, methods=["get"], url_path="download")
-    def download_attachment(self, request, pk=None):
-        attachment = Attachment.objects.get(id=pk)
-
-        from apps.core.r2_client import generate_signed_url
-        url = generate_signed_url(attachment.key, expires=3600)
-
-        return Response({"url": url})
+    @action(detail=True, methods=['post'], url_path='toggle')
+    def toggle(self, request, pk=None):
+        task  = self.get_object()
+        cycle = [Task.STATUS_PENDING, Task.STATUS_IN_PROGRESS, Task.STATUS_COMPLETED]
+        try:
+            nxt = cycle[(cycle.index(task.status) + 1) % len(cycle)]
+        except ValueError:
+            nxt = Task.STATUS_PENDING
+        task.status = nxt
+        task.save(update_fields=['status', 'updated_at'])
+        return Response({'id': task.id, 'status': task.status})

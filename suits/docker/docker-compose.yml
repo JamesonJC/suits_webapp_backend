@@ -1,0 +1,79 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml — Local Development Environment
+#
+# USAGE:
+#   Start everything:   docker compose -f suits/docker/docker-compose.yml up
+#   Stop everything:    docker compose -f suits/docker/docker-compose.yml down
+#   Rebuild backend:    docker compose -f suits/docker/docker-compose.yml up --build
+#   Run migrations:     docker compose -f suits/docker/docker-compose.yml exec backend python manage.py migrate
+#   Create superuser:   docker compose -f suits/docker/docker-compose.yml exec backend python manage.py createsuperuser
+#   Shell:              docker compose -f suits/docker/docker-compose.yml exec backend python manage.py shell
+#
+# SERVICES:
+#   db       — PostgreSQL 15 (same major version as Render production)
+#   backend  — Django dev server with auto-reload (NOT Gunicorn)
+#
+# Note: This uses the dev server (manage.py runserver) for hot-reload.
+#       Production uses Gunicorn via Dockerfile + entrypoint.sh.
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL database ─────────────────────────────────────────────────────
+  db:
+    image: postgres:15-alpine      # Alpine = smaller image, same Postgres 15
+    container_name: suits_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       suits
+      POSTGRES_USER:     suits_user
+      POSTGRES_PASSWORD: suits_dev_password   # Local only — not a secret
+    ports:
+      - "5432:5432"                # Expose so you can connect with pgAdmin etc.
+    volumes:
+      - postgres_data:/var/lib/postgresql/data   # Persist DB across restarts
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U suits_user -d suits"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Django backend ──────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ..                  # Build context = suits/ directory
+      dockerfile: Dockerfile       # Use the production Dockerfile as base
+      target: builder              # Stop at the builder stage (has dev tools)
+    container_name: suits_backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy # Wait for Postgres to be ready
+    environment:
+      # Override production settings with local dev values
+      SECRET_KEY:    "dev-only-secret-key-change-in-production"
+      DEBUG:         "True"
+      DATABASE_URL:  "postgresql://suits_user:suits_dev_password@db:5432/suits"
+      ALLOWED_HOSTS: "localhost,127.0.0.1,0.0.0.0,backend"
+      CORS_ALLOWED_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount source code so changes are reflected immediately (hot-reload)
+      - ..:/app
+    # Dev command: run migrations then start the dev server with auto-reload
+    command: >
+      sh -c "
+        echo '  Running migrations...' &&
+        python manage.py migrate --noinput &&
+        echo ' Migrations done.' &&
+        echo '  Starting dev server...' &&
+        python manage.py runserver 0.0.0.0:8000
+      "
+
+volumes:
+  postgres_data:
+    # Named volume — survives "docker compose down" but NOT "docker compose down -v"
+    # Run "docker compose down -v" to wipe the database and start fresh

@@ -74,4 +74,5 @@ urlpatterns = [
 
     # All workflow data: /api/workflow-templates/, /api/steps/, /api/transitions/
     path('api/', include('apps.workflows.urls')),
+    path('api/', include('apps.jobs.urls')),
 ]

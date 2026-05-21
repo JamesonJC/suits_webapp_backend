@@ -1,0 +1,102 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# render.yaml — Infrastructure as Code for Render
+#
+# Place this file at the ROOT of the suits_webapp_backend repository.
+#
+# HOW TO USE:
+#   1. Push this file to your GitHub repo
+#   2. In Render Dashboard → New → Blueprint
+#   3. Connect your GitHub repo — Render reads this file automatically
+#   4. Set SECRET_KEY manually in the Render dashboard (it's a secret,
+#      never put real values in render.yaml which is committed to git)
+#
+# WHAT THIS CREATES:
+#   • suits-backend  — Django API web service (Docker)
+#   • suits-db       — PostgreSQL 15 database (free plan)
+#
+# DEPLOYMENT FLOW PER PUSH:
+#   1. Render detects new commit on "main"
+#   2. Builds Docker image from suits/Dockerfile
+#   3. Runs entrypoint.sh in the new container:
+#        a. python manage.py migrate --noinput   ← ALL migrations run here
+#        b. gunicorn config.wsgi:application      ← server starts
+#   4. Old container keeps serving until new one is healthy
+#   5. Traffic switches to new container (zero-downtime deploy)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Django API Backend ──────────────────────────────────────────────────────
+  - type: web
+    name: suits-backend
+    runtime: docker
+
+    # Root directory relative to the repo root.
+    # Render uses this as the Docker build context (same as "docker build ./suits")
+    rootDir: suits
+
+    # Path to the Dockerfile, relative to rootDir
+    dockerfilePath: ./Dockerfile
+
+    # Which Git branch to deploy from
+    branch: main
+
+    # Render plan — "free" spins down after 15 min inactivity (causes cold starts)
+    # Upgrade to "starter" ($7/mo) to eliminate cold starts
+    plan: free
+
+    # Health check — Render pings this URL to confirm the container is healthy
+    # before routing traffic. Returns 200 from Django's default root view.
+    healthCheckPath: /api/auth/me/
+
+    envVars:
+      # ── Injected automatically by Render when DB is linked ──────────────────
+      - key: DATABASE_URL
+        fromDatabase:
+          name: suits-db
+          property: connectionString
+
+      # ── Generate a cryptographically strong random secret key ───────────────
+      # "generateValue: true" tells Render to create one automatically.
+      # You can also set this manually in the dashboard after first deploy.
+      - key: SECRET_KEY
+        generateValue: true
+
+      # ── Application settings ─────────────────────────────────────────────────
+      - key: DEBUG
+        value: "False"
+
+      - key: ALLOWED_HOSTS
+        # Replace with your actual Render service URL after first deploy
+        value: "suits-backend.onrender.com,localhost,127.0.0.1"
+
+      - key: CORS_ALLOWED_ORIGINS
+        # Replace with your actual frontend URL
+        # Comma-separated, no trailing slash
+        value: "https://new-suits-systems.onrender.com,http://localhost:3000"
+
+      # ── Gunicorn tuning ───────────────────────────────────────────────────────
+      - key: GUNICORN_WORKERS
+        value: "2"
+
+      - key: GUNICORN_TIMEOUT
+        value: "120"
+
+      # ── Cloudflare R2 (set real values in Render Dashboard, not here) ────────
+      - key: CLOUDFLARE_R2_KEY_ID
+        value: ""
+      - key: CLOUDFLARE_R2_SECRET_KEY
+        value: ""
+      - key: CLOUDFLARE_R2_BUCKET
+        value: ""
+      - key: CLOUDFLARE_R2_ACCOUNT_ID
+        value: ""
+
+  # ── PostgreSQL Database ─────────────────────────────────────────────────────
+databases:
+  - name: suits-db
+    databaseName: suits
+    user: suits_user
+    plan: free
+    # Free Postgres on Render expires after 90 days — upgrade to starter ($7/mo)
+    # to keep it permanently. Export your data before the 90-day mark.
