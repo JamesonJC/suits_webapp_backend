@@ -3,6 +3,9 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from django.db import transaction
+import traceback
+
 from .models import Task
 from .serializers import TaskSerializer
 
@@ -21,26 +24,20 @@ class TaskViewSet(viewsets.ModelViewSet):
         if not user or not user.is_authenticated:
             return Task.objects.none()
 
-        # Admins can see everything
+        # Admins see everything
         if _is_admin(user):
             return Task.unscoped.all()
 
-        # Attorney-scoped access
         attorney = getattr(user, "attorney", None)
 
         if attorney and attorney.law_firm:
-            return Task.objects.filter(
-                law_firm=attorney.law_firm
-            )
+            return Task.objects.filter(law_firm=attorney.law_firm)
 
-        # Tenant fallback
         tenant = getattr(self.request, "tenant", None)
 
         if tenant:
             try:
-                return Task.objects.filter(
-                    law_firm=tenant.law_firm
-                )
+                return Task.objects.filter(law_firm=tenant.law_firm)
             except Exception:
                 pass
 
@@ -48,21 +45,29 @@ class TaskViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         """
-        Automatically attach the attorney's law firm
-        when available.
-
-        Avoids passing unsupported fields like `tenant`
-        that may not exist on the model.
+        Robust create with transaction + full traceback logging.
+        This ensures production errors are visible and not silently 500'ing.
         """
+
         user = self.request.user
         attorney = getattr(user, "attorney", None)
 
-        if attorney and attorney.law_firm:
-            serializer.save(
-                law_firm=attorney.law_firm
-            )
-        else:
-            serializer.save()
+        try:
+            with transaction.atomic():
+
+                if attorney and attorney.law_firm:
+                    serializer.save(law_firm=attorney.law_firm)
+                else:
+                    serializer.save()
+
+        except Exception:
+            #  THIS IS THE KEY FIX: force real error visibility
+            print("TASK CREATE FAILED")
+            print("User:", user)
+            print("Attorney:", attorney)
+            print("Request data:", self.request.data)
+            traceback.print_exc()
+            raise
 
     @action(detail=True, methods=["post"], url_path="toggle")
     def toggle(self, request, pk=None):
@@ -82,7 +87,6 @@ class TaskViewSet(viewsets.ModelViewSet):
             next_status = Task.STATUS_PENDING
 
         task.status = next_status
-
         task.save(update_fields=["status", "updated_at"])
 
         return Response({
