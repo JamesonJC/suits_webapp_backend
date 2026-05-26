@@ -30,6 +30,9 @@ gunicorn==22.0.0
 
 # ── Environment / config ──────────────────────────────────────────────────────
 # python-decouple reads .env in dev and real env vars in prod.
+# python-dotenv is a dependency of python-decouple, but we pin it explicitly too.
+# Both are required:
+python-dontenv==1.2.1
 python-decouple==3.8
 
 # ── Cloudflare R2 / S3-compatible storage ─────────────────────────────────────
