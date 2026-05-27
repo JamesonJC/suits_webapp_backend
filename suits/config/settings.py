@@ -4,10 +4,10 @@ from pathlib import Path
 from datetime import timedelta
 import os
 from urllib.parse import urlparse, parse_qsl
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
 from decouple import config, Csv
 
-load_dotenv()
+#load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
